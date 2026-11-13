@@ -291,7 +291,6 @@ def main():
     background(os.path.join(OUT, "bg_mix.png"), [(0, 2, 0, 0, "LOOP VOLUME", None), (0, 0, 1, 1, None, None), (2, 2, 1, 3, None, None),
                                                 (3, 3, 0, 3, "OUTPUT", None)])
     background(os.path.join(OUT, "bg_sound.png"), [(c, c, 0, 1, "BANK %d" % (c + 1), None) for c in range(3)])
-    background(os.path.join(OUT, "bg_debug.png"), [(0, 3, 0, 2, "DIAGNOSTICS", None)])
     print("wrote", len(os.listdir(OUT)), "images to", OUT)
 
 

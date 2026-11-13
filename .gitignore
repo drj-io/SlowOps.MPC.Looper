@@ -66,3 +66,6 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Release zips (scripts/package via tools/package.py)
+dist/

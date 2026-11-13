@@ -27,10 +27,10 @@ static int g_fail = 0, g_pass = 0;
 // Parameter indices (plugin/src/SlowOpsLooper.cpp). Bank params: B(bank, kX), bank 0 = the bare names.
 enum P { kMix = 0, kTone, kDrift, kCapMode, kPlayMode,
          kLength, kVolume, kFeedback, kSolo, kMute, kOverdub, kCapture, kClear, kProgress, kStatus };
-static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 25;
-enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState, kClearAll, kMetronome, kClickLevel, kMetroAuto, kMetroTap, kMonitor, kLatency, kPlayAll, kPlay1, kPlay2, kPlay3, kPlayTiming, kPlayState1, kPlayState2, kPlayState3, kPlayStateAll, kTestTone };
+static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 24;
+enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState, kClearAll, kMetronome, kClickLevel, kMetroAuto, kMetroTap, kMonitor, kLatency, kPlayAll, kPlay1, kPlay2, kPlay3, kPlayTiming, kPlayState1, kPlayState2, kPlayState3, kPlayStateAll };
 static int B(int bank, int p) { return p + bank * kPerBank; }
-static bool isReadOnly(int i) { return (i >= kBeat && i < kClearAll) || i == kTestTone || (i >= kPlayState1 && i <= kPlayStateAll) || (i >= 5 && i < kBeat && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
+static bool isReadOnly(int i) { return (i >= kBeat && i < kClearAll) || (i >= kPlayState1 && i <= kPlayStateAll) || (i >= 5 && i < kBeat && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
 static float choice(int i, int n) { return (float)i / (float)(n - 1); }
 
 // ---- host side ----------------------------------------------------------------------
@@ -292,7 +292,6 @@ static void stateRecall()
     want.push_back({kPlay2, 1.0f});
     want.push_back({kPlay3, 0.0f});
     want.push_back({kPlayTiming, 0.5f});
-    want.push_back({kTestTone, 0.0f});
     CHECK((int)want.size() + 18 == kNum, "test does not cover every writable parameter");
     std::vector<uint8_t> chunk;
     std::vector<std::string> texts;
@@ -699,16 +698,6 @@ static void beatAndDebug()
         m.set(kPlay1, 0.0f); m.runFor(0.05);
         CHECK(std::fabs(at(tap + 300) - 0.3f) < 1e-3 && m.text(kPlayState1) == "Stopped", "Immediate stop: %g (want 0.3: bank 2 bar B), %s",
               at(tap + 300), m.text(kPlayState1).c_str());
-    }
-    // Test tone: off by default; on, a steady -20 dBFS 440 Hz even with the transport stopped.
-    {
-        Plug tt; tt.playing = false;
-        CHECK(tt.text(kTestTone) == "Off", "test tone default %s", tt.text(kTestTone).c_str());
-        tt.set(kTestTone, 1.0f);
-        tt.runFor(0.5);
-        double pk = 0.0;
-        for (size_t i = 11025; i < tt.outL.size(); ++i) pk = std::fmax(pk, std::fabs(tt.outL[i] - tt.inL[i]));
-        CHECK(std::fabs(pk - 0.1) < 0.002, "test tone peak %g, want 0.1", pk);
     }
     // Stopped transport: the beat keeps counting on the internal clock.
     p.playing = false;

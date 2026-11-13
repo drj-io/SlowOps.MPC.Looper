@@ -103,56 +103,6 @@
         },
         "empty"
       ]
-    },
-    {
-      "name": "DEBUG",
-      "controls": [
-        {
-          "param": "Transport",
-          "widget": "slider"
-        },
-        {
-          "param": "Position",
-          "widget": "slider"
-        },
-        {
-          "param": "Bars Seen",
-          "widget": "slider"
-        },
-        {
-          "param": "Loop Level",
-          "widget": "slider"
-        },
-        {
-          "param": "Taps",
-          "widget": "slider"
-        },
-        {
-          "param": "Last Cap",
-          "widget": "slider"
-        },
-        {
-          "param": "Loop State",
-          "widget": "slider"
-        },
-        {
-          "param": "Test Tone",
-          "widget": "switch"
-        },
-        {
-          "param": "Status 1",
-          "widget": "slider"
-        },
-        {
-          "param": "Status 2",
-          "widget": "slider"
-        },
-        {
-          "param": "Status 3",
-          "widget": "slider"
-        },
-        "empty"
-      ]
     }
   ]
 }
