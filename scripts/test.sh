@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SDK="$ROOT/third_party/mpc-plugin-builder-sdk"
-LIB="$ROOT/plugin/build/native/slow-ops-looper.dylib"
+LIB="$ROOT/plugin/build/native/looper.dylib"
 [ "$(uname)" = "Darwin" ] || LIB="${LIB%.dylib}.so"
 cd "$ROOT"
 "$ROOT/scripts/build.sh"

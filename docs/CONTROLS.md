@@ -51,9 +51,8 @@ Per bank *n* = 1, 2, 3, at index 5 + 10 × (*n* − 1) + offset:
 The buttons and the choice selectors are images with the text drawn in (`scripts/make_buttons.py`), so no text
 label sits on top of a button and taps always reach it.
 
-**Metronome.** A short pop on every beat, a little higher and louder on the 1. Click Level 50 % peaks at
-about −19 dBFS. It sounds whether or not the MPC transport plays: stopped, it keeps time at the
-project tempo; playing, it locks to the song position. It is added to the plugin's output after the
+**Metronome.** A short pop on every beat, a little higher and louder on the 1. It sounds while the looper is playing (master PLAY on), with or without the MPC transport. Click Level 50 % peaks at
+about −19 dBFS. With the transport stopped it keeps time at the project tempo; playing, it locks to the song position. It is added to the plugin's output after the
 loops, so it is never recorded into a bank. It is part of the track's output, though, so it will be in a
 resample or a bounce of that track.
 
@@ -66,11 +65,15 @@ The METRONOME button has three states, shown on the button. Each tap steps Off �
 **Auto Standby** (MIX page, next to Click Level; on by default) is for laying down the first loop to the click: when the
 first loop since CLEAR ALL is captured, the metronome goes from On to Standby. It does this once per
 CLEAR ALL, so if you tap it back On it stays On. With Auto Standby off, On stays On.
+Re-recording the first loop: with Next Bar, if no other bank has a loop and the metronome is on Standby, CAPTURE
+switches it On for the count-in and the recording; when the new loop starts it goes back to Standby. If that
+capture is cancelled or refused, it goes back to Standby straight away. With other loops playing it stays on
+Standby (they keep time).
 
 Appended parameters (indices 43–58): Clear All (trigger), Metronome (Off / Standby / On; 0 / 0.5 / 1, so a
 project saved when this was an Off/On switch loads the same), Click Level (0–100 %, default 50 %),
 Auto Standby (Off/On, default On), Metro Tap (trigger: the METRONOME button), Monitor (Off/On, default On), Latency (−50…50 ms, default 12 ms), Play All (master PLAY/STOP, default On), Play 1–3 (per bank, default On), Play Timing (Immediate / Bar End /
-Loop End, default Immediate), Play State 1–3 and Play All State (read-only: Stopped / Playing / Starting / Stopping).
+Loop End, default Loop End), Play State 1–3 and Play All State (read-only: Stopped / Playing / Starting / Stopping).
 
 **Monitor** (MIX page, next to Mix; on by default). On: the live input goes through the plugin and Mix
 blends it with the loops. Off: the plugin outputs only the loops, at full level (Mix is ignored), and the
@@ -88,6 +91,9 @@ every loop, including ones already recorded, and overdubs stay in line with it.
   Stop stops the looper, Play starts it again. Pressing it never starts the MPC transport. Pressed while the
   transport is stopped, the looper starts its own bar 1 right then and every loop plays from its beginning
   (an armed Next Bar capture starts recording at that moment).
+- Master STOP also stops the count: the metronome goes quiet, the beat boxes hold on 1, and a capture waiting
+  for its "1" or recording is cancelled. They run again on the next master PLAY. (With Bar End / Loop End
+  timing they keep going until the last bank has played out.)
 - **Per bank** (next to CLEAR n) stops or starts that bank. A stopped bank keeps its place, so it comes back in
   time. A stopped bank does not overdub.
 - Capturing into a bank turns that bank's PLAY on (and the master's, if it was stopped), so you hear what you
@@ -98,6 +104,12 @@ every loop, including ones already recorded, and overdubs stay in line with it.
   STOPPING; a start on a boundary comes in at full level on its first sample. The transport always acts
   immediately (MPC Stop stops at once), and master PLAY from fully stopped always starts at once, from the top. Captures always
 take the live input, whatever Monitor is set to.
+
+**Re-capturing a playing bank.** With Next Bar, the old loop plays through the count-in (while CAPTURE waits
+for the 1), stops on the downbeat where recording starts (5 ms fade), and the new loop starts on the downbeat
+after recording ends, at full level from its first sample. With Last Bar or Rolling the new loop replaces the
+old one at once with a 20 ms crossfade. A freshly recorded loop always starts with its first downbeat intact:
+while its audio is still being copied into place (a few milliseconds), it plays straight from the recording.
 
 **Solo and Mute** act on the loop banks only. The live track is always governed by Mix. When any bank is
 soloed, only the soloed banks are heard. A bank that is both muted and soloed stays muted. Muted banks keep
@@ -137,7 +149,7 @@ Preferences → Enhancements (Beta) → **Enable Enhancements** and **External P
 After installing a new build, save the project and restart the MPC. It only rereads the screen layout on
 restart.
 
-1. Insert **Slow Ops Looper** on the *Ichigo* track, with drums on their own track. Play: the track sounds
+1. Insert **Looper** (Slow Ops) on the *Ichigo* track, with drums on their own track. Play: the track sounds
    unchanged, and the beat boxes count 1–4 in cyan.
 2. Tap **CAPTURE** in bank 1 (every bank defaults to 4 bars and Next Bar). The beat boxes and the button turn
    orange ("WAITING FOR 1"), red from the next 1 for four bars ("RECORDING"), then green ("PLAYING"). The Bank 1

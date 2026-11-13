@@ -66,6 +66,7 @@ static void testMultiBarCaptures()
             s.runUntil((int64_t)((2.0 + n) * bar) - 256);
             CHECK(s.e.status(0) == Status::Recording, "Next %d: %s during recording", n, statusName(s.e.status(0)));
             CHECK(s.runUntilStatus(Status::Playing), "Next %d never Playing", n);
+            for (int k = 0; k < 64 && !s.e.hasLoop(0); ++k) s.runFor(0.01);   // playing from history until the copy lands
             CHECK(barsContentError(s, 0, bar, 2) < 1e-6, "Next %d: loop is not bars 3..%d", n, n + 2);
         }
     }
@@ -234,18 +235,30 @@ static void testMetronome()
         }
         CHECK(clicks == 4, "transport stopped: %d clicks in 2 s at 120 BPM, want 4", clicks);
     }
-    // Stopped, but the host keeps the playing flag set over a frozen position: still clicks on every beat.
+    // Stopped, but the host keeps the playing flag set over a frozen position: that counts as the
+    // transport stopping (master off, so the metronome is silent). Master PLAY by hand (the plugin
+    // turns playAll on and calls restartFromTop) then clicks on the internal clock.
     {
         Sim s; s.g.metronome = true; s.playing = false; s.flagWhenStopped = true;
+        s.runFor(0.2);
+        s.g.playAll = false;                       // the plugin mirrors the transport stop
+        s.runFor(0.5);
+        const size_t quietFrom = (size_t)(0.25 * 44100), quietTo = s.outL.size();
+        double quiet = 0.0;
+        for (size_t i = quietFrom; i < quietTo; ++i) quiet = std::fmax(quiet, std::fabs(s.outL[i]));
+        s.g.playAll = true; s.e.restartFromTop();  // master PLAY by hand
+        const size_t from = s.outL.size();
         s.runFor(2.0);
-        int clicks = 0;
-        for (int64_t b = 1; b * 22050 < (int64_t)s.outL.size(); ++b)
-        {
-            double pk = 0.0;
-            for (int64_t i = b * 22050 - 600; i < b * 22050 + 1323 && i < (int64_t)s.outL.size(); ++i) pk = std::fmax(pk, std::fabs(s.outL[(size_t)i]));
-            if (pk > 1e-3) ++clicks;
-        }
-        CHECK(clicks >= 3 && !s.e.diagnostics().hostLocked, "flag set, position frozen: %d clicks, locked %d", clicks, s.e.diagnostics().hostLocked);
+        int onsets = 0;
+        for (size_t i = from + 1; i < s.outL.size(); ++i)
+            if (std::fabs(s.outL[i]) > 1e-3 && std::fabs(s.outL[i - 1]) <= 1e-3)
+            {
+                bool fresh = true;
+                for (size_t k = (i > 2000 ? i - 2000 : 0); k + 1 < i; ++k) if (std::fabs(s.outL[k]) > 1e-3 && k >= from) { fresh = false; break; }
+                onsets += fresh;
+            }
+        CHECK(quiet == 0.0 && onsets == 4 && !s.e.diagnostics().hostLocked, "flag set, position frozen: stopped peak %g, %d clicks after PLAY (want 0, 4), locked %d",
+              quiet, onsets, s.e.diagnostics().hostLocked);
     }
     // Not captured: a loop recorded with the metronome on contains only the input.
     {

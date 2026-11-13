@@ -141,7 +141,7 @@ public:
         addParam(mpc::boolParam("playall", "Play All", true));
         for (int b = 0; b < kBanks; ++b)
             addParam(mpc::boolParam(("play" + std::to_string(b + 1)).c_str(), ("Play " + std::to_string(b + 1)).c_str(), true));
-        addParam(mpc::choiceParam("playtiming", "Play Timing", {"Immediate", "Bar End", "Loop End"}, 0));
+        addParam(mpc::choiceParam("playtiming", "Play Timing", {"Immediate", "Bar End", "Loop End"}, 2));   // default Loop End
         for (int b = 0; b <= kBanks; ++b)
         {
             const std::string n = b < kBanks ? std::to_string(b + 1) : std::string("all");
@@ -189,6 +189,23 @@ public:
             {
                 setNormalised(idx(b, kCapture), 0.0f);
                 notifyHostParameterChanged(idx(b, kCapture));
+                // Auto Standby: re-recording the first loop (no other bank has one) with Next Bar
+                // wakes a Standby metronome for the count-in and the recording; the new loop
+                // then puts it back to Standby as usual. (A tap on an armed bank cancels instead.)
+                {
+                    const looper::Status st = engine_.status(b);
+                    bool others = false;
+                    for (int o = 0; o < kBanks; ++o) others = others || (o != b && engine_.hasLoop(o));
+                    if (getBool(kMetroAuto) && getInt(kMetronome) == kMetroStandby && !others &&
+                        getInt(kCaptureMode) == (int)looper::CaptureMode::NextBar &&
+                        st != looper::Status::Armed && st != looper::Status::Recording)
+                    {
+                        setMetronome(kMetroOn);
+                        metroBase_ = engine_.diagnostics().loopsCompleted;
+                        metroAutoDone_ = false;
+                        metroWokeBank_ = b;
+                    }
+                }
                 engine_.requestCapture(b);
                 // A capture is meant to be heard: its bank and the master go to PLAY (no restart).
                 if (!getBool(kPlay1 + b)) setSwitch(kPlay1 + b, true);
@@ -300,6 +317,18 @@ public:
                 metroAutoDone_ = true;
                 if (getBool(kMetroAuto) && getInt(kMetronome) == kMetroOn) setMetronome(kMetroStandby);
             }
+            // The woken capture is over: finished (the rule above), or cancelled / refused: back to Standby.
+            if (metroWokeBank_ >= 0)
+            {
+                const looper::Status st = engine_.status(metroWokeBank_);
+                if (done - metroBase_ >= 1) metroWokeBank_ = -1;
+                else if (st != looper::Status::Armed && st != looper::Status::Recording)   // over without a new loop (or handing over)
+                {
+                    if (getInt(kMetronome) == kMetroOn) setMetronome(kMetroStandby);
+                    metroAutoDone_ = true;
+                    metroWokeBank_ = -1;
+                }
+            }
         }
 
         if (statusHoldLeft_ > 0) { statusHoldLeft_ -= ctx.numFrames; return; }
@@ -373,9 +402,9 @@ public:
 
             // Progress: quantised to 16th notes of the loop and sent at most every 40 ms.
             progressAge_[b] += ctx.numFrames;
-            const int bars = engine_.loopBars(b);
+            const int bars = engine_.dialBars(b);   // a recording capture turns the dial too
             const float steps = (float)(16 * (bars > 0 ? bars : 1));
-            const float prog = bars > 0 ? std::floor(engine_.progress(b) * steps) / steps : 0.0f;
+            const float prog = bars > 0 ? std::floor(engine_.dialProgress(b) * steps) / steps : 0.0f;
             const int pi = idx(b, kProgress);
             if (getNormalised(pi) != prog && (progressAge_[b] >= progressMinSamples_ || prog == 0.0f))
             {
@@ -401,7 +430,7 @@ public:
         if (index >= kFirstDebug && index < kFirstDebug + kNumDebug) { out = debugText(index - kFirstDebug); return true; }
         if (index >= kNumGlobal && index < kBeat && (index - kNumGlobal) % kPerBank == kProgress)   // "bar/bars", e.g. "3/4"
         {
-            const int bars = engine_.loopBars((index - kNumGlobal) / kPerBank);
+            const int bars = engine_.dialBars((index - kNumGlobal) / kPerBank);
             if (bars <= 0) { out = "--"; return true; }
             int bar = (int)std::floor(plainValue * 0.01f * (float)bars) + 1;
             if (bar > bars) bar = bars;
@@ -421,7 +450,7 @@ private:
     static mpc::PluginInfo makeInfo()
     {
         mpc::PluginInfo info;
-        info.name = "Slow Ops Looper";              // == plugin.json "name"
+        info.name = "Looper";                       // == plugin.json "name" (the MPC shows "Slow Ops" above it; a longer name gets cut)
         info.vendor = "Slow Ops";                   // == plugin.json "manufacturer"
         info.uniqueId = MPC_FOURCC('S', 'o', 'L', 'p');   // == plugin.json "uid"
         info.version = 2000;
@@ -524,6 +553,7 @@ private:
     bool metroRearm_ = false;        // Clear All pressed this block
     bool metroAutoDone_ = false;     // the first-loop On -> Standby already happened since the last re-arm
     bool hadLoop_ = false;           // any bank held a loop last block
+    int  metroWokeBank_ = -1;        // a Next Bar re-capture of the first loop woke a Standby metronome
     bool hostWasRunning_ = false;    // transport state last block (edges drive Play All)
     bool playAllWas_ = true;         // Play All last block (a hand-made Off -> On restarts from the top)
     int progressMinSamples_ = 1764;

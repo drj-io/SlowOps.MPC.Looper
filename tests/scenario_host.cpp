@@ -5,7 +5,7 @@
 // script tempo/bar position). Build:
 //   clang++ -std=c++17 -O2 -I third_party/mpc-plugin-builder-sdk/framework \
 //       tests/scenario_host.cpp -o build/scenario_host
-// Run:  build/scenario_host plugin/build/native/slow-ops-looper.dylib [out_dir]
+// Run:  build/scenario_host plugin/build/native/looper.dylib [out_dir]
 #include "mpc_vst2_abi.h"
 
 #include <dlfcn.h>
@@ -89,6 +89,7 @@ struct Plug
         {
             set(kDrift, 0.0f);
             set(kLatency, 0.5f);                   // 0 ms: the sample-exact loop checks below assume no offset
+            set(kPlayTiming, 0.0f);                // Immediate: the PLAY/STOP checks below expect taps to act at once
             set(B(0, kLength), 0.0f);              // 1 bar
             set(B(1, kLength), 1.0f / 3.0f);       // 2 bars
             set(B(2, kLength), 2.0f / 3.0f);       // 4 bars
@@ -659,7 +660,7 @@ static void beatAndDebug()
     {
         Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(0, 3));
         m.set(B(0, kLength), 0.0f); m.set(B(1, kLength), 1.0f / 3.0f);
-        CHECK(m.text(kPlayTiming) == "Immediate", "Play Timing default %s", m.text(kPlayTiming).c_str());
+        { Plug plain(512, false); CHECK(plain.text(kPlayTiming) == "Loop End", "Play Timing default %s", plain.text(kPlayTiming).c_str()); }
         const int64_t bar = (int64_t)std::llround(m.barSamples());
         m.input = [bar](int64_t t, int) { const int64_t b = t / bar; return b < 2 ? 0.25f : b == 2 ? 0.5f : b == 3 ? 0.3f : 0.0f; };
         m.runUntil(2 * bar + bar / 4); m.set(B(0, kCapture), 1.0f); // bank 1 = bar 1 (0.25)
@@ -698,6 +699,118 @@ static void beatAndDebug()
         m.set(kPlay1, 0.0f); m.runFor(0.05);
         CHECK(std::fabs(at(tap + 300) - 0.3f) < 1e-3 && m.text(kPlayState1) == "Stopped", "Immediate stop: %g (want 0.3: bank 2 bar B), %s",
               at(tap + 300), m.text(kPlayState1).c_str());
+    }
+    // Re-capture into a playing bank (Next Bar): the old loop plays through the count-in, stops
+    // when recording starts, and the new loop comes in at full level on its first sample.
+    {
+        Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(0, 3)); m.set(B(0, kLength), 0.0f);   // 1 bar
+        const int64_t bar = (int64_t)std::llround(m.barSamples());
+        m.input = [bar](int64_t t, int) { return t < 3 * bar ? 0.25f : 0.5f; };
+        m.runUntil(2 * bar + bar / 2);
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.3);        // Last Bar: loop A = 0.25
+        m.set(kCapMode, choice(2, 3));                     // then Next Bar for the re-capture
+        m.runUntil(3 * bar + bar / 2);
+        m.set(B(0, kCapture), 1.0f);                       // armed: records bar 4, plays from bar 5
+        m.runUntil(6 * bar + bar / 2);
+        auto at = [&m](int64_t i) { return m.outL[(size_t)i]; };
+        std::printf("  re-capture: count-in %.3f, recording %.3f, new loop at its 1: %.3f, then %.3f\n",
+                    at(4 * bar - 3000), at(4 * bar + 600), at(5 * bar), at(5 * bar + 3000));
+        CHECK(std::fabs(at(4 * bar - 3000) - 0.25f) < 1e-3, "count-in: old loop %g, want 0.25", at(4 * bar - 3000));
+        CHECK(std::fabs(at(4 * bar + 600)) < 1e-6 && std::fabs(at(4 * bar + bar / 2)) < 1e-6, "recording: old loop still audible (%g)", at(4 * bar + 600));
+        CHECK(std::fabs(at(5 * bar) - 0.5f) < 1e-3 && std::fabs(at(5 * bar + 3000) - 0.5f) < 1e-3 && std::fabs(at(6 * bar + 3000) - 0.5f) < 1e-3,
+              "new loop: %g at its first sample, %g, %g (want 0.5)", at(5 * bar), at(5 * bar + 3000), at(6 * bar + 3000));
+    }
+    // A fresh Next Bar capture: the loop's first downbeat plays in full (no copy gap, no fade-in).
+    {
+        Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(2, 3)); m.set(B(0, kLength), 1.0f / 3.0f);   // 2 bars
+        const int64_t bar = (int64_t)std::llround(m.barSamples());
+        m.input = [bar](int64_t t, int) { return t < 3 * bar && t % bar < 200 ? 0.9f : 0.0f; };   // a hit on each recorded downbeat
+        m.runUntil(bar / 2);
+        m.set(B(0, kCapture), 1.0f);                       // records bars 1-2, plays from bar 3
+        m.runUntil(3 * bar + bar / 2);
+        float pk = 0.0f;
+        for (int64_t i = 3 * bar; i < 3 * bar + 200; ++i) pk = std::fmax(pk, std::fabs(m.outL[(size_t)i]));
+        std::printf("  fresh capture: first downbeat %.3f (sample 0: %.3f)\n", pk, m.outL[(size_t)(3 * bar)]);
+        CHECK(std::fabs(m.outL[(size_t)(3 * bar)] - 0.9f) < 1e-3, "fresh capture: first downbeat %g at its first sample, want 0.9", m.outL[(size_t)(3 * bar)]);
+    }
+    // Auto Standby + re-recording the first loop (Next Bar, no other loops): Standby -> On for the
+    // count-in and recording, back to Standby once the new loop plays. Not when other loops exist.
+    {
+        Plug m; m.set(kCapMode, choice(2, 3)); m.set(B(0, kLength), 0.0f); m.set(B(1, kLength), 0.0f);   // Next Bar, 1 bar
+        const int64_t bar = (int64_t)std::llround(m.barSamples());
+        m.input = [](int64_t t, int) { return (float)(0.2 * std::sin(0.03 * t)); };
+        m.set(kMetroTap, 1.0f); m.runFor(0.05);                       // Off -> On
+        m.runUntil(bar / 2);
+        m.set(B(0, kCapture), 1.0f);                                   // first loop: records bar 1
+        m.runUntil(2 * bar + bar / 2);
+        CHECK(m.text(B(0, kStatus)) == "Playing" && m.text(kMetronome) == "Standby", "first loop: %s, metronome %s",
+              m.text(B(0, kStatus)).c_str(), m.text(kMetronome).c_str());
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.05);                  // re-record it
+        CHECK(m.text(B(0, kStatus)) == "Armed" && m.text(kMetronome) == "On", "re-record count-in: %s, metronome %s",
+              m.text(B(0, kStatus)).c_str(), m.text(kMetronome).c_str());
+        m.runUntil(3 * bar + bar / 2);
+        CHECK(m.text(B(0, kStatus)) == "Rec Bar" && m.text(kMetronome) == "On", "re-record recording: %s, metronome %s",
+              m.text(B(0, kStatus)).c_str(), m.text(kMetronome).c_str());
+        m.runUntil(4 * bar + bar / 2);
+        CHECK(m.text(B(0, kStatus)) == "Playing" && m.text(kMetronome) == "Standby", "re-recorded: %s, metronome %s",
+              m.text(B(0, kStatus)).c_str(), m.text(kMetronome).c_str());
+        // Cancelled (a second tap while armed): back to Standby, old loop still there.
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.05);
+        CHECK(m.text(kMetronome) == "On", "second re-record: metronome %s", m.text(kMetronome).c_str());
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.05);
+        CHECK(m.text(B(0, kStatus)) == "Playing" && m.text(kMetronome) == "Standby", "cancelled: %s, metronome %s",
+              m.text(B(0, kStatus)).c_str(), m.text(kMetronome).c_str());
+        // With another loop playing, re-recording bank 1 leaves the metronome on Standby.
+        m.set(kCapMode, choice(0, 3)); m.runFor(0.05);
+        m.set(B(1, kCapture), 1.0f); m.runFor(0.3);                   // Last Bar into bank 2
+        m.set(kCapMode, choice(2, 3)); m.runFor(0.05);
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.05);
+        CHECK(m.text(B(1, kStatus)) == "Playing" && m.text(B(0, kStatus)) == "Armed" && m.text(kMetronome) == "Standby",
+              "with bank 2 playing: bank 1 %s, metronome %s", m.text(B(0, kStatus)).c_str(), m.text(kMetronome).c_str());
+    }
+    // Recording turns the bank's dial: a 4-bar Next Bar capture reads 1/4 .. 4/4 while it records.
+    {
+        Plug m; m.set(kCapMode, choice(2, 3)); m.set(B(0, kLength), 2.0f / 3.0f);   // Next Bar, 4 bars
+        const int64_t bar = (int64_t)std::llround(m.barSamples());
+        m.input = [](int64_t t, int) { return (float)(0.2 * std::sin(0.03 * t)); };
+        m.runUntil(bar / 2);
+        CHECK(m.text(B(0, kProgress)) == "--", "dial before capture: %s", m.text(B(0, kProgress)).c_str());
+        m.set(B(0, kCapture), 1.0f);
+        m.runUntil(bar + bar / 2);                 // recording started at bar 1; half a bar in
+        const std::string d1 = m.text(B(0, kProgress));
+        const float p1 = m.get(B(0, kProgress));
+        m.runUntil(3 * bar + bar / 2);             // 2.5 bars in
+        const std::string d2 = m.text(B(0, kProgress));
+        const float p2 = m.get(B(0, kProgress));
+        std::printf("  recording dial: %s (%.3f) -> %s (%.3f), status %s\n", d1.c_str(), p1, d2.c_str(), p2, m.text(B(0, kStatus)).c_str());
+        CHECK(m.text(B(0, kStatus)) == "Rec Bar" && d1 == "1/4" && d2 == "3/4" && p1 > 0.1f && p1 < 0.13f && p2 > 0.6f && p2 < 0.63f,
+              "recording dial: %s (%g) -> %s (%g), status %s", d1.c_str(), p1, d2.c_str(), p2, m.text(B(0, kStatus)).c_str());
+        m.runUntil(5 * bar + bar / 4);
+        CHECK(m.text(B(0, kStatus)) == "Playing" && m.text(B(0, kProgress)) == "1/4", "after recording: %s, dial %s",
+              m.text(B(0, kStatus)).c_str(), m.text(B(0, kProgress)).c_str());
+    }
+    // Master STOP stops the metronome and the count: a capture waiting for its "1" is cancelled
+    // and the beat boxes hold on 1. Master PLAY starts the click again.
+    {
+        Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(2, 3)); m.set(kMetronome, 1.0f);
+        m.playing = false;
+        m.runFor(1.2);
+        double pk = 0.0;
+        for (float x : m.outL) pk = std::fmax(pk, std::fabs(x));
+        CHECK(pk > 0.05, "metronome before master stop: %g", pk);
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.05);
+        CHECK(m.text(B(0, kStatus)) == "Armed", "Next Bar armed: %s", m.text(B(0, kStatus)).c_str());
+        m.set(kPlayAll, 0.0f); m.runFor(0.05);
+        m.outL.clear(); m.inL.clear(); m.outR.clear(); m.inR.clear();
+        m.runFor(2.5);
+        pk = 0.0;
+        for (float x : m.outL) pk = std::fmax(pk, std::fabs(x));
+        CHECK(pk == 0.0 && m.text(B(0, kStatus)) != "Armed" && m.text(B(0, kStatus)) != "Rec Bar" && m.text(kBeat) == "1" && m.text(kLoopState) == "Idle",
+              "master stop: click %g, status %s, beat %s, state %s", pk, m.text(B(0, kStatus)).c_str(), m.text(kBeat).c_str(), m.text(kLoopState).c_str());
+        m.set(kPlayAll, 1.0f); m.runFor(1.2);
+        pk = 0.0;
+        for (size_t i = m.outL.size() - 44100; i < m.outL.size(); ++i) pk = std::fmax(pk, std::fabs(m.outL[i]));
+        CHECK(pk > 0.05, "metronome after master play: %g", pk);
     }
     // Stopped transport: the beat keeps counting on the internal clock.
     p.playing = false;

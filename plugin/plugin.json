@@ -1,7 +1,7 @@
 {
-  "name": "Slow Ops Looper",
+  "name": "Looper",
   "manufacturer": "Slow Ops",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "format": "vst2",
   "kind": "effect",
   "uid": "SoLp",

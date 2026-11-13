@@ -11,4 +11,4 @@ mkdir -p build
 c++ -std=c++17 -O2 -Wall -Wextra -I core/include tests/core_tests.cpp -o build/core_tests
 c++ -std=c++17 -O2 -Wall -I "$SDK/framework" tests/scenario_host.cpp -o build/scenario_host
 echo
-echo "MPC folder: $ROOT/plugin/build/Slow Ops - VST - Slow Ops Looper"
+echo "MPC folder: $ROOT/plugin/build/Slow Ops - VST - Looper"
