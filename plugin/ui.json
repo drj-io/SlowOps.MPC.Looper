@@ -188,7 +188,10 @@
           "param": "Last Cap",
           "widget": "slider"
         },
-        "empty",
+        {
+          "param": "Loop State",
+          "widget": "slider"
+        },
         "empty",
         {
           "param": "Status 1",

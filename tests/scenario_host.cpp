@@ -26,8 +26,8 @@ static int g_fail = 0, g_pass = 0;
 // Parameter indices (plugin/src/SlowOpsLooper.cpp). Bank params: B(bank, kX), bank 0 = the bare names.
 enum P { kMix = 0, kTone, kDrift, kCapMode, kPlayMode,
          kLength, kVolume, kFeedback, kSolo, kMute, kOverdub, kCapture, kClear, kProgress, kStatus };
-static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 7;
-enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel };
+static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 8;
+enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState };
 static int B(int bank, int p) { return p + bank * kPerBank; }
 static bool isReadOnly(int i) { return i >= kBeat || (i >= 5 && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
 static float choice(int i, int n) { return (float)i / (float)(n - 1); }
@@ -145,7 +145,8 @@ static void passThrough()
 static void lastCompleteBar()
 {
     std::printf("[Capture: Last Complete Bar via the plugin]\n");
-    Plug p; p.set(kMix, 1.0f);
+    Plug p; p.set(kMix, 1.0f); p.set(kCapMode, choice(0, 3));   // these checks use Last Bar (default is Next Bar)
+
     const double bar = p.barSamples();
     p.input = barCoded(bar);
     p.runFor(0.5);
@@ -196,25 +197,31 @@ static void rollingBar()
 
 static void nextBar()
 {
-    std::printf("[Capture: Next Bar via the plugin]\n");
-    Plug p; p.set(kMix, 1.0f); p.set(kCapMode, choice(2, 3));
+    std::printf("[Capture: Next Bar (the default) via the plugin, beat-box colours]\n");
+    Plug p; p.set(kMix, 1.0f);
+    CHECK(p.text(kCapMode) == "Next Bar", "default capture mode is %s", p.text(kCapMode).c_str());
+    CHECK(p.text(kLoopState) == "Idle", "loop state before capture: %s", p.text(kLoopState).c_str());
     const double bar = p.barSamples();
     p.input = barCoded(bar);
     p.runUntil((int64_t)(1.3 * bar));
     CHECK(p.text(kStatus) == "Ready", "Next Bar ready status = %s", p.text(kStatus).c_str());
     p.set(kCapture, 1.0f);
     p.block(128);
-    std::string s1 = p.text(kStatus);
+    std::string s1 = p.text(kStatus), c1 = p.text(kLoopState);
     p.runUntil((int64_t)(2.0 * bar) + 2000);
-    std::string s2 = p.text(kStatus);
+    std::string s2 = p.text(kStatus), c2 = p.text(kLoopState);
     p.runUntil((int64_t)(3.0 * bar) + 2000);
-    std::string s3 = p.text(kStatus);
+    std::string s3 = p.text(kStatus), c3 = p.text(kLoopState);
+    std::printf("  beat-box state: %s -> %s -> %s\n", c1.c_str(), c2.c_str(), c3.c_str());
+    CHECK(c1 == "Armed" && c2 == "Rec" && c3 == "Play", "loop state sequence wrong");
     std::printf("  status: after press %s, after downbeat %s, after the bar %s\n", s1.c_str(), s2.c_str(), s3.c_str());
     CHECK(s1 == "Armed" && s2 == "Rec Bar" && s3 == "Playing", "status sequence wrong");
     p.runUntil((int64_t)(5.0 * bar));
     double err = 0.0;
     for (int64_t t = (int64_t)(4.0 * bar) + 10; t < (int64_t)(5.0 * bar) - 460; ++t) err = std::fmax(err, std::fabs(p.outL[(size_t)t] - 0.3f));
     CHECK(err < 1e-4, "Next Bar loop is not bar 3 (err %g)", err);
+    p.set(kOverdub, 1.0f); p.block(128);
+    CHECK(p.text(kLoopState) == "Dub", "loop state while overdubbing: %s", p.text(kLoopState).c_str());
 }
 
 static void feedbackDecay()
@@ -263,7 +270,7 @@ static void stateRecall()
         want.push_back({B(b, kCapture), 0.0f});
         want.push_back({B(b, kClear), 0.0f});
     }
-    CHECK((int)want.size() + 13 == kNum, "test does not cover every writable parameter");
+    CHECK((int)want.size() + 14 == kNum, "test does not cover every writable parameter");
     std::vector<uint8_t> chunk;
     std::vector<std::string> texts;
     {
@@ -319,7 +326,8 @@ static void stateRecall()
 static void banksScenario()
 {
     std::printf("[Three banks via the plugin: 1/2/4 bars, progress dials, solo, mute, volume]\n");
-    Plug p; p.set(kMix, 1.0f);
+    Plug p; p.set(kMix, 1.0f); p.set(kCapMode, choice(0, 3));   // these checks use Last Bar (default is Next Bar)
+
     const double bar = p.barSamples();
     float level = 0.0f;
     p.input = [&](int64_t, int) { return level; };
@@ -375,7 +383,8 @@ static void banksScenario()
 static void beatAndDebug()
 {
     std::printf("[Beat boxes and DEBUG readouts]\n");
-    Plug p; p.set(kMix, 1.0f);
+    Plug p; p.set(kMix, 1.0f); p.set(kCapMode, choice(0, 3));   // these checks use Last Bar (default is Next Bar)
+
     p.input = [](int64_t t, int) { return (float)(0.3 * std::sin(0.02 * t)); };
     // Beat: 120 BPM, a beat is 22050 samples. Sample the Beat text mid-beat for 8 beats.
     std::string seq;
@@ -486,6 +495,7 @@ static void ichigoRender(const std::string& outDir)
         if (b == 4 || b == 5) x += phraseAt(s);
         return 0.22f * x * (ch ? 0.95f : 1.0f);
     };
+    p.set(kCapMode, choice(0, 3));
     p.set(kFeedback, 0.6f);
     p.set(kMix, 0.5f);
     p.set(kDrift, 0.15f);

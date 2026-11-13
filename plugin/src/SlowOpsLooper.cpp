@@ -58,10 +58,11 @@ public:
         kDbgTaps,
         kDbgLastCapture,
         kDbgLoopLevel,
+        kLoopState,      // Idle / Armed / Rec / Play / Dub: colours the beat boxes
         kEnd
     };
     static constexpr int kNumParams = kEnd;
-    static constexpr int kFirstDebug = kDbgTransport, kNumDebug = kEnd - kDbgTransport;
+    static constexpr int kFirstDebug = kDbgTransport, kNumDebug = kLoopState - kDbgTransport;
     static int idx(int bank, int p) { return kNumGlobal + bank * kPerBank + p; }
 
     SlowOpsLooper() : mpc::Plugin(makeInfo())
@@ -71,7 +72,8 @@ public:
         addParam(mpc::floatParam("mix", "Mix", 0.0f, 100.0f, 50.0f, "%", 0));
         addParam(mpc::floatParam("tone", "Tone", 0.0f, 100.0f, 100.0f, "", 0));
         addParam(mpc::floatParam("drift", "Drift", 0.0f, 100.0f, 15.0f, "%", 0));
-        addParam(mpc::choiceParam("capmode", "Capture Mode", {"Last Bar", "Rolling", "Next Bar"}, 0));
+        // Default Next Bar: Capture waits for the next "1", then records the bank's length.
+        addParam(mpc::choiceParam("capmode", "Capture Mode", {"Last Bar", "Rolling", "Next Bar"}, 2));
         addParam(mpc::choiceParam("playmode", "Play Mode", {"Freeze", "On Demand", "Continuous"}, 1));
 
         const int defaultLength[kBanks] = {0, 1, 2};   // 1, 2 and 4 bars
@@ -107,6 +109,9 @@ public:
             p.automatable = false;
             addParam(p);
         }
+        mpc::Param state = mpc::choiceParam("loopstate", "Loop State", {"Idle", "Armed", "Rec", "Play", "Dub"}, 0);
+        state.automatable = false;
+        addParam(state);
         if (numParams() != kNumParams) mpc::log("SlowOpsLooper: parameter count mismatch");
         // No built-in programs beyond "Default": a program writes every parameter,
         // which must never fire Capture or Clear.
@@ -194,6 +199,26 @@ public:
         const float beatNorm = (float)(engine_.diagnostics().beat % 4) / 3.0f;
         if (getNormalised(kBeat) != beatNorm) { setNormalised(kBeat, beatNorm); notifyHostParameterChanged(kBeat); }
 
+        // Beat box colour: the most urgent state of any bank.
+        //   Rec (red) > Armed (orange, waiting for the next "1") > Dub (purple) > Play (green) > Idle.
+        int state = 0;
+        for (int b = 0; b < kBanks; ++b)
+        {
+            int s = 0;
+            switch (engine_.status(b))
+            {
+                case looper::Status::Recording:   s = 4; break;
+                case looper::Status::Armed:       s = 3; break;
+                case looper::Status::Overdubbing: s = 2; break;
+                case looper::Status::Playing:     s = 1; break;
+                default:                          s = 0; break;
+            }
+            if (s > state) state = s;
+        }
+        static const int kStateChoice[5] = {0, 3, 4, 1, 2};   // priority -> Idle, Play, Dub, Armed, Rec
+        const float stateNorm = (float)kStateChoice[state] / 4.0f;
+        if (getNormalised(kLoopState) != stateNorm) { setNormalised(kLoopState, stateNorm); notifyHostParameterChanged(kLoopState); }
+
         // DEBUG readouts: bump a readout's value whenever its text changes (so the MPC
         // redraws it), at most every 100 ms.
         debugAge_ += ctx.numFrames;
@@ -243,7 +268,7 @@ public:
             out = buf;
             return true;
         }
-        if (index >= kFirstDebug && index < kEnd) { out = debugText(index - kFirstDebug); return true; }
+        if (index >= kFirstDebug && index < kFirstDebug + kNumDebug) { out = debugText(index - kFirstDebug); return true; }
         if (index >= kNumGlobal && index < kBeat && (index - kNumGlobal) % kPerBank == kProgress)   // "bar/bars", e.g. "3/4"
         {
             const int bars = engine_.loopBars((index - kNumGlobal) / kPerBank);
