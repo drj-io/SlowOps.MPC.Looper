@@ -15,7 +15,7 @@ single-loop prototype. The index order is what automation and Q-Link maps use.
 | 0 | Mix | 0–100 % (equal power, live vs. all banks) | 50 % | LOOPS | 4 | yes |
 | 1 | Tone | 400 Hz … 18 kHz, 100 % = Flat | Flat | MIX | 8 | yes |
 | 2 | Drift | 0–100 % | 15 % | MIX | 12 | yes |
-| 3 | Capture Mode | Last Bar / Rolling / Next Bar | Last Bar | LOOPS | — | yes |
+| 3 | Capture Mode | Last Bar / Rolling / Next Bar | Next Bar | LOOPS | — | yes |
 | 4 | Play Mode | Freeze / On Demand / Continuous | On Demand | LOOPS | — | yes |
 
 Per bank *n* = 1, 2, 3, at index 5 + 10 × (*n* − 1) + offset:
@@ -29,15 +29,24 @@ Per bank *n* = 1, 2, 3, at index 5 + 10 × (*n* − 1) + offset:
 | +4 | Mute *n* | Off / On | Off | MIX | — | yes |
 | +5 | Overdub *n* | Off / On (latched, used by On Demand) | Off | LOOPS | — | yes |
 | +6 | Capture *n* | trigger | Off | LOOPS | — | yes |
-| +7 | Clear *n* | trigger | Off | MIX | — | yes |
+| +7 | Clear *n* | trigger | Off | LOOPS | — | yes |
 | +8 | Bank *n* | progress dial, shows "bar/bars" (e.g. 3/4) or "--" | — | LOOPS | — | **no** |
-| +9 | Status *n* | No Hist / Ready / Armed / Rec Bar / Playing / Overdub / Too Long | — | LOOPS | — | **no** |
+| +9 | Status *n* | No Hist / Ready / Armed / Rec Bar / Playing / Overdub / Too Long (also shown on the Capture *n* button) | — | DEBUG | — | **no** |
 
-**Screen layout.** Each page has one column per bank (1, 2, 3). The fourth column holds the shared controls:
+**Screen layout.** Each page has one column per bank (1, 2, 3). The fourth column holds the shared controls.
 
-- **LOOPS:** Bank dials · Status · Capture · Overdub, with Mix, Capture Mode and Play Mode.
-- **MIX:** Volume · Solo · Mute · Clear, with Tone and Drift.
-- **SOUND:** Length · Feedback.
+- **LOOPS:**
+  - Across the top: four beat boxes. The box for the current beat lights, and the colour shows the state:
+    cyan idle, orange waiting for the next 1, red recording, green playing, purple overdubbing.
+  - Below them, per bank: the Bank dial, then CAPTURE, OVERDUB and CLEAR buttons.
+  - Shared column: Mix, Capture Mode and Play Mode.
+  - Each CAPTURE button shows its own bank's state in the same colours, with the state written underneath.
+- **MIX:** Volume, SOLO and MUTE per bank, with Tone and Drift.
+- **SOUND:** Length (1/2/4/8 bars) and Feedback per bank.
+- **DEBUG:** what the MPC reports and what the plugin saw, plus Loop State and Status 1–3.
+
+The buttons and the choice selectors are images with the text drawn in (`scripts/make_buttons.py`), so no text
+label sits on top of a button and taps always reach it.
 
 **Solo and Mute** act on the loop banks only. The live track is always governed by Mix. When any bank is
 soloed, only the soloed banks are heard. A bank that is both muted and soloed stays muted. Muted banks keep
