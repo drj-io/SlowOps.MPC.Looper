@@ -25,6 +25,7 @@ struct Sim
     double sr = 44100.0, bpm = 120.0;
     int num = 4, den = 4;
     bool playing = true;
+    bool reportPlaying = true;   // false: host advances its position but never sets the playing flag
     double ppq = 0.0;          // host song position (advances only while playing)
     int block = 128;
     bool inPlace = false;
@@ -51,7 +52,7 @@ struct Sim
             const int n = (int)std::min<int64_t>(block, end - t);
             for (int i = 0; i < n; ++i) { bl[i] = input(t + i, 0); br[i] = input(t + i, 1); }
             TransportInfo ti;
-            ti.playing = playing; ti.ppqValid = true; ti.barsValid = true; ti.bpm = bpm;
+            ti.playing = playing && reportPlaying; ti.ppqValid = true; ti.barsValid = true; ti.bpm = bpm;
             ti.timeSigNumerator = num; ti.timeSigDenominator = den; ti.ppqPos = ppq;
             const double barQ = num * 4.0 / den;
             ti.barStartPpq = std::floor(ppq / barQ + 1e-9) * barQ;

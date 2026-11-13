@@ -63,6 +63,7 @@ enum class CaptureResult : int { None = 0, Queued, Armed, Cancelled, NoHistory, 
 struct Diagnostics
 {
     bool    playing = false, ppqValid = false, hostLocked = false;
+    bool    positionMoving = false;   // host song position advancing with the audio (flag or not)
     double  bpm = 0.0, ppqPos = 0.0, barLen = 0.0;
     int     timeSigNumerator = 4, timeSigDenominator = 4;
     int     beat = 0;                 // beat within the bar, 0-based
@@ -218,7 +219,26 @@ public:
         if (!prepared_ || numFrames <= 0) return;
         if (inR == nullptr) inR = inL;
 
-        const ClockBlock cb = clock_.advance(transport, numFrames);
+        // "Playing" = the host's flag OR its song position advancing in step with the
+        // audio (some hosts leave the flag unset). Two consecutive advancing blocks count.
+        TransportInfo tp = transport;
+        {
+            bool advancing = false;
+            if (transport.ppqValid && havePrevPpq_ && std::isfinite(transport.ppqPos))
+            {
+                const double bpm = std::isfinite(transport.bpm) ? clampv(transport.bpm, 20.0, 400.0) : 120.0;
+                const double expected = prevPpq_ + prevFrames_ * bpm / 60.0 / sr_;
+                const double tol = std::fmax(2.0, 0.005 * sr_) * bpm / 60.0 / sr_;
+                advancing = transport.ppqPos > prevPpq_ && std::fabs(transport.ppqPos - expected) <= tol;
+            }
+            advanceRun_ = advancing ? advanceRun_ + 1 : 0;
+            havePrevPpq_ = transport.ppqValid && std::isfinite(transport.ppqPos);
+            prevPpq_ = transport.ppqPos;
+            prevFrames_ = numFrames;
+            tp.playing = transport.playing || advanceRun_ >= 2;
+            diag_.positionMoving = advanceRun_ >= 2;
+        }
+        const ClockBlock cb = clock_.advance(tp, numFrames);
         barLen_ = cb.barLen;
         mode_ = g.captureMode;
         diag_.playing = transport.playing;
@@ -293,7 +313,7 @@ public:
 
         // Metronome: beat boundaries in this block (nearest sample, like downbeats).
         int beatOffsets[64]; int beatIndex[64]; int numBeats = 0;
-        if (g.metronome && transport.playing)
+        if (g.metronome && tp.playing)
         {
             const int num = clampv(transport.timeSigNumerator, 1, 32);
             const double beatLen = cb.barLen / num;
@@ -670,6 +690,11 @@ private:
     int    copyBank_ = -1;
 
     Diagnostics diag_;
+
+    // transport detection
+    bool    havePrevPpq_ = false;
+    double  prevPpq_ = 0.0;
+    int     prevFrames_ = 0, advanceRun_ = 0;
 
     // metronome (added to the output only; never recorded into history or loops)
     std::vector<float> clickTable_[2];

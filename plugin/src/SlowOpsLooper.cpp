@@ -316,7 +316,7 @@ private:
     // ---- diagnostics: copied from the engine on the audio thread, read by the UI thread ----
     struct Snap
     {
-        std::atomic<int> playing{0}, ppqValid{0}, locked{0}, num{4}, den{4}, lastBank{-1}, lastResult{0};
+        std::atomic<int> playing{0}, moving{0}, ppqValid{0}, locked{0}, num{4}, den{4}, lastBank{-1}, lastResult{0};
         std::atomic<float> bpm{0.0f}, ppq{0.0f}, peakDb{-120.0f}, lastSeconds{0.0f};
         std::atomic<int64_t> bars{0}, jumps{0}, caps[kBanks], clears[kBanks];
         Snap() { for (int b = 0; b < kBanks; ++b) { caps[b] = 0; clears[b] = 0; } }
@@ -327,6 +327,7 @@ private:
         const looper::Diagnostics& d = engine_.diagnostics();
         snap_.playing = t.valid && t.playing ? 1 : 0;
         snap_.ppqValid = t.valid && t.ppqValid ? 1 : 0;
+        snap_.moving = d.positionMoving ? 1 : 0;
         snap_.locked = d.hostLocked ? 1 : 0;
         snap_.num = d.timeSigNumerator; snap_.den = d.timeSigDenominator;
         snap_.bpm = (float)d.bpm; snap_.ppq = (float)d.ppqPos;
@@ -344,7 +345,7 @@ private:
     {
         switch (d)
         {
-            case 0: return (uint64_t)snap_.playing * 1000003u + (uint64_t)snap_.ppqValid * 7919u + (uint64_t)snap_.locked * 131u
+            case 0: return (uint64_t)snap_.playing * 1000003u + (uint64_t)snap_.moving * 4999u + (uint64_t)snap_.ppqValid * 7919u + (uint64_t)snap_.locked * 131u
                          + (uint64_t)std::lround(snap_.bpm.load() * 10.0f) * 65537u + (uint64_t)snap_.num * 17u + (uint64_t)snap_.den;
             case 1: return (uint64_t)std::floor(snap_.ppq.load());
             case 2: return (uint64_t)snap_.bars.load() * 1000u + (uint64_t)snap_.jumps.load();
@@ -360,8 +361,9 @@ private:
         char buf[48];
         switch (d)
         {
-            case 0:   // e.g. "Play 92.0 4/4" / "Stop 92.0 4/4" ; "!ppq" when the host gives no position
-                std::snprintf(buf, sizeof(buf), "%s %.1f %d/%d%s", snap_.playing ? "Play" : "Stop", (double)snap_.bpm.load(),
+            case 0:   // "Play 92.0 4/4" (host flag), "Run ..." (no flag, but the position moves), "Stop ...";
+                      // "!ppq" when the host gives no position, "int" when the internal clock runs
+                std::snprintf(buf, sizeof(buf), "%s %.1f %d/%d%s", snap_.playing ? "Play" : (snap_.moving ? "Run" : "Stop"), (double)snap_.bpm.load(),
                               snap_.num.load(), snap_.den.load(), snap_.ppqValid ? (snap_.locked ? "" : " int") : " !ppq");
                 break;
             case 1:   // host position in quarter notes
