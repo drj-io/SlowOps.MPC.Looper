@@ -27,7 +27,7 @@
           "Q-Link 13": -1,
           "Q-Link 14": -1,
           "Q-Link 15": -1,
-          "Q-Link 16": 0
+          "Q-Link 16": -1
         }
       },
       {
@@ -38,11 +38,11 @@
           "Q-Link 1": -1,
           "Q-Link 2": -1,
           "Q-Link 3": -1,
-          "Q-Link 4": -1,
+          "Q-Link 4": 45,
           "Q-Link 5": 9,
           "Q-Link 6": 19,
           "Q-Link 7": 29,
-          "Q-Link 8": -1,
+          "Q-Link 8": 0,
           "Q-Link 9": 8,
           "Q-Link 10": 18,
           "Q-Link 11": 28,

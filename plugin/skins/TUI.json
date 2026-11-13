@@ -814,6 +814,13 @@
         ]
       },
       {
+        "key": "Parameter 44",
+        "value": [
+          "Off",
+          "On"
+        ]
+      },
+      {
         "key": "Parameter 3",
         "value": [
           "Last Bar",
@@ -1769,35 +1776,6 @@
               "version": 2,
               "componentData": {
                 "version": 1,
-                "name": "Mix",
-                "type": "faderUni",
-                "data": {
-                  "version": 1,
-                  "handleName": "Data"
-                }
-              },
-              "handle remapping": {
-                "version": 1,
-                "map": [
-                  {
-                    "key": "Data",
-                    "value": "Parameter 0"
-                  }
-                ]
-              },
-              "bounds": {
-                "version": 1,
-                "acceptsHWFocus": "Yes",
-                "showWhenDataModelInvalid": "Hide",
-                "whenVisible": "Always",
-                "boundsType": "Absolute",
-                "bounds": "983 45 278 107"
-              }
-            },
-            {
-              "version": 2,
-              "componentData": {
-                "version": 1,
                 "name": "Capture 1 nohist",
                 "type": "Button",
                 "data": {
@@ -2673,6 +2651,35 @@
               "version": 2,
               "componentData": {
                 "version": 1,
+                "name": "Metronome",
+                "type": "Button",
+                "data": {
+                  "version": 2,
+                  "onImage": "metronome_on.png",
+                  "offImage": "metronome_off.png",
+                  "buttonId": 1,
+                  "numButtonsInGroup": 1,
+                  "handleName": "Parameter 44",
+                  "gestureBehaviour": "Instant"
+                }
+              },
+              "handle remapping": {
+                "version": 1,
+                "map": []
+              },
+              "bounds": {
+                "version": 1,
+                "acceptsHWFocus": "No",
+                "showWhenDataModelInvalid": "Hide",
+                "whenVisible": "Always",
+                "boundsType": "Absolute",
+                "bounds": "998 57 248 84"
+              }
+            },
+            {
+              "version": 2,
+              "componentData": {
+                "version": 1,
                 "name": "Capture Mode name",
                 "type": "Label",
                 "data": {
@@ -3093,6 +3100,64 @@
                 "whenVisible": "Always",
                 "boundsType": "Absolute",
                 "bounds": "983 196 278 107"
+              }
+            },
+            {
+              "version": 2,
+              "componentData": {
+                "version": 1,
+                "name": "Mix",
+                "type": "faderUni",
+                "data": {
+                  "version": 1,
+                  "handleName": "Data"
+                }
+              },
+              "handle remapping": {
+                "version": 1,
+                "map": [
+                  {
+                    "key": "Data",
+                    "value": "Parameter 0"
+                  }
+                ]
+              },
+              "bounds": {
+                "version": 1,
+                "acceptsHWFocus": "Yes",
+                "showWhenDataModelInvalid": "Hide",
+                "whenVisible": "Always",
+                "boundsType": "Absolute",
+                "bounds": "983 346 278 107"
+              }
+            },
+            {
+              "version": 2,
+              "componentData": {
+                "version": 1,
+                "name": "Click Level",
+                "type": "knobUni",
+                "data": {
+                  "version": 1,
+                  "handleName": "Data"
+                }
+              },
+              "handle remapping": {
+                "version": 1,
+                "map": [
+                  {
+                    "key": "Data",
+                    "value": "Parameter 45"
+                  }
+                ]
+              },
+              "bounds": {
+                "version": 1,
+                "acceptsHWFocus": "Yes",
+                "showWhenDataModelInvalid": "Hide",
+                "whenVisible": "Always",
+                "boundsType": "Absolute",
+                "bounds": "983 497 278 107"
               }
             },
             {

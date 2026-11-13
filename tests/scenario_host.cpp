@@ -26,10 +26,10 @@ static int g_fail = 0, g_pass = 0;
 // Parameter indices (plugin/src/SlowOpsLooper.cpp). Bank params: B(bank, kX), bank 0 = the bare names.
 enum P { kMix = 0, kTone, kDrift, kCapMode, kPlayMode,
          kLength, kVolume, kFeedback, kSolo, kMute, kOverdub, kCapture, kClear, kProgress, kStatus };
-static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 9;
-enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState, kClearAll };
+static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 11;
+enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState, kClearAll, kMetronome, kClickLevel };
 static int B(int bank, int p) { return p + bank * kPerBank; }
-static bool isReadOnly(int i) { return (i >= kBeat && i != kClearAll) || (i >= 5 && i < kBeat && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
+static bool isReadOnly(int i) { return (i >= kBeat && i < kClearAll) || (i >= 5 && i < kBeat && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
 static float choice(int i, int n) { return (float)i / (float)(n - 1); }
 
 // ---- host side ----------------------------------------------------------------------
@@ -279,6 +279,8 @@ static void stateRecall()
         want.push_back({B(b, kClear), 0.0f});
     }
     want.push_back({kClearAll, 0.0f});
+    want.push_back({kMetronome, 1.0f});
+    want.push_back({kClickLevel, 0.3f});
     CHECK((int)want.size() + 14 == kNum, "test does not cover every writable parameter");
     std::vector<uint8_t> chunk;
     std::vector<std::string> texts;
@@ -303,6 +305,7 @@ static void stateRecall()
     }
     // Project reload: a fresh instance, state restored, then audio starts.
     Plug b;
+    b.playing = false;   // the restored Metronome is On; stopped, it stays silent so the dry check below is exact
     b.disp(effSetChunk, 0, (VstIntPtr)chunk.size(), chunk.data());
     b.input = [](int64_t t, int ch) { return (float)(0.3 * std::sin(0.02 * t + ch)); };
     b.runFor(0.5);
@@ -424,6 +427,19 @@ static void beatAndDebug()
     CHECK(p.text(kDbgLast) == "B1 OK 2.0s", "last capture text %s", p.text(kDbgLast).c_str());
     const int lvl = std::atoi(p.text(kDbgLevel).c_str());   // the 0.3 sine at Mix 100 %: about -10 dB, slow release
     CHECK(lvl <= -9 && lvl >= -12, "loop level text %s", p.text(kDbgLevel).c_str());
+    // Metronome via the plugin: off by default, blips on the beat when on.
+    {
+        Plug m; m.set(kMix, 1.0f);
+        CHECK(m.text(kMetronome) == "Off" && m.text(kClickLevel) == "50", "metronome defaults %s / %s", m.text(kMetronome).c_str(), m.text(kClickLevel).c_str());
+        m.set(kMetronome, 1.0f);
+        m.runFor(1.0);
+        double pk = 0.0;
+        for (int64_t i = 22050; i < 22050 + 1323; ++i) pk = std::fmax(pk, std::fabs(m.outL[(size_t)i]));
+        double gap = 0.0;
+        for (int64_t i = 22050 + 2000; i < 44100 - 10; ++i) gap = std::fmax(gap, std::fabs(m.outL[(size_t)i]));
+        std::printf("  metronome: beat 2 peak %.3f, between beats %.4f\n", pk, gap);
+        CHECK(pk > 0.05 && pk < 0.2 && gap < 1e-6, "metronome blip wrong (peak %g, gap %g)", pk, gap);
+    }
     // Stopped transport: the beat keeps counting on the internal clock.
     p.playing = false;
     p.runFor(0.6);

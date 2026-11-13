@@ -60,6 +60,8 @@ public:
         kDbgLoopLevel,
         kLoopState,      // Idle / Armed / Rec / Play / Dub: colours the beat boxes
         kClearAll,       // trigger: clears every bank (same self-resetting behaviour as Clear n)
+        kMetronome,      // click on every beat while the MPC transport plays (output only, never recorded)
+        kClickLevel,     // metronome level, 0..100 % (50 % is about -19 dBFS peak)
         kEnd
     };
     static constexpr int kNumParams = kEnd;
@@ -114,6 +116,8 @@ public:
         state.automatable = false;
         addParam(state);
         addParam(mpc::boolParam("clearall", "Clear All", false));
+        addParam(mpc::boolParam("metro", "Metronome", false));
+        addParam(mpc::floatParam("clicklvl", "Click Level", 0.0f, 100.0f, 50.0f, "%", 0));
         if (numParams() != kNumParams) mpc::log("SlowOpsLooper: parameter count mismatch");
         // No built-in programs beyond "Default": a program writes every parameter,
         // which must never fire Capture or Clear.
@@ -174,6 +178,8 @@ public:
         g.drift = get(kDrift) * 0.01f;
         g.captureMode = (looper::CaptureMode)getInt(kCaptureMode);
         g.playbackMode = (looper::PlaybackMode)getInt(kPlayMode);
+        g.metronome = getBool(kMetronome);
+        g.clickLevel = get(kClickLevel) * 0.01f;
         looper::BankParams bp[kBanks];
         for (int b = 0; b < kBanks; ++b)
         {

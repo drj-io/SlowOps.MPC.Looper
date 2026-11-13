@@ -83,6 +83,8 @@ struct GlobalParams
     float mix = 0.5f;     // 0..1  equal-power live/loops blend (dry only while no loop exists)
     CaptureMode  captureMode = CaptureMode::LastCompleteBar;
     PlaybackMode playbackMode = PlaybackMode::OverdubOnDemand;
+    bool  metronome = false;   // click on every beat while the host transport plays
+    float clickLevel = 0.5f;   // 0..1 (squared law; 0.5 is about -18 dBFS peak)
 };
 
 struct BankParams
@@ -110,6 +112,7 @@ public:
     static constexpr int64_t kCopyChunk   = 131072;  // frames copied per block (memcpy)
     static constexpr int64_t kCopyMargin  = 16384;   // history kept free for in-flight copies
     static constexpr int    kMaxDownbeats = 16;
+    static constexpr double kClickSeconds = 0.030;   // metronome blip length
 
     // ---- setup (allocates) -------------------------------------------------
     // maxLoopSeconds: longest loop per bank. extraHistorySeconds: history beyond
@@ -143,6 +146,19 @@ public:
             k.dub.setTime((int)std::lround(kDubSeconds * sampleRate));
         }
         drift_.prepare(sampleRate);
+        // Metronome blips: a decaying sine, 2.2 kHz on the downbeat, 1.6 kHz otherwise.
+        const int clickLen = (int)std::lround(kClickSeconds * sampleRate);
+        for (int a = 0; a < 2; ++a)
+        {
+            const double hz = a ? 2200.0 : 1600.0;
+            clickTable_[a].assign((size_t)clickLen, 0.0f);
+            for (int i = 0; i < clickLen; ++i)
+            {
+                const double t = i / sampleRate;
+                const double env = std::exp(-t / 0.006) * std::fmin(1.0, i / (0.0005 * sampleRate));
+                clickTable_[a][(size_t)i] = (float)(env * std::sin(2.0 * kPi * hz * t) * (a ? 1.0 : 0.7));
+            }
+        }
         prepared_ = true;
         reset();
     }
@@ -171,6 +187,8 @@ public:
             k.firstBlock = true;
         }
         mixFirst_ = true;
+        clickPos_ = -1;
+        lastClick_ = -1;
     }
 
     void requestCapture(int bank) { if (bank >= 0 && bank < kNumBanks) banks_[bank].captureReq.store(true, std::memory_order_release); }
@@ -273,6 +291,28 @@ public:
         }
         drift_.renormalise();
 
+        // Metronome: beat boundaries in this block (nearest sample, like downbeats).
+        int beatOffsets[64]; int beatIndex[64]; int numBeats = 0;
+        if (g.metronome && transport.playing)
+        {
+            const int num = clampv(transport.timeSigNumerator, 1, 32);
+            const double beatLen = cb.barLen / num;
+            const double ph = std::fmod(cb.phase0, beatLen);
+            for (int k = 0; numBeats < 64; ++k)
+            {
+                const double off = std::floor(k * beatLen - ph + 0.5);
+                if (off >= numFrames) break;
+                if (off < 0.0) continue;
+                const int64_t at = now_ + (int64_t)off;
+                if (lastClick_ >= 0 && (double)(at - lastClick_) < beatLen * 0.5) continue;   // duplicate
+                lastClick_ = at;
+                beatOffsets[numBeats] = (int)off;
+                beatIndex[numBeats] = (int)std::lround((cb.phase0 + off) / beatLen) % num;
+                ++numBeats;
+            }
+        }
+        const float clickGain = clampv(g.clickLevel, 0.0f, 1.0f) * clampv(g.clickLevel, 0.0f, 1.0f) * 0.5f;
+        int bti = 0;
         float loopPeak = 0.0f;
         int dbi = 0;
         for (int i = 0; i < numFrames; ++i)
@@ -330,8 +370,15 @@ public:
             const float aw = std::fabs(wl) > std::fabs(wr) ? std::fabs(wl) : std::fabs(wr);
             if (aw > loopPeak) loopPeak = aw;
             const float dryG = 1.0f - presMax * (1.0f - dryMix_);
-            outL[i] = xl * dryG + wl * wetMix_;
-            outR[i] = xr * dryG + wr * wetMix_;
+            float click = 0.0f;
+            if (bti < numBeats && beatOffsets[bti] == i) { clickPos_ = 0; clickAccent_ = beatIndex[bti] == 0 ? 1 : 0; ++bti; }
+            if (clickPos_ >= 0)
+            {
+                click = clickTable_[clickAccent_][(size_t)clickPos_] * clickGain;
+                if (++clickPos_ >= (int)clickTable_[clickAccent_].size()) clickPos_ = -1;
+            }
+            outL[i] = xl * dryG + wl * wetMix_ + click;
+            outR[i] = xr * dryG + wr * wetMix_ + click;
 
             ++now_;
             for (Bank& k : banks_)
@@ -623,6 +670,11 @@ private:
     int    copyBank_ = -1;
 
     Diagnostics diag_;
+
+    // metronome (added to the output only; never recorded into history or loops)
+    std::vector<float> clickTable_[2];
+    int     clickPos_ = -1, clickAccent_ = 0;
+    int64_t lastClick_ = -1;
 
     // shared control
     DriftSource drift_;

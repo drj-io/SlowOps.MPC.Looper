@@ -16,10 +16,7 @@
           "param": "Bank 3",
           "widget": "knob"
         },
-        {
-          "param": "Mix",
-          "widget": "fader"
-        },
+        "empty",
         "empty",
         "empty",
         "empty",
@@ -63,7 +60,17 @@
         "empty",
         "empty",
         "empty",
-        "empty"
+        {
+          "param": "Mix",
+          "widget": "fader"
+        },
+        "empty",
+        "empty",
+        "empty",
+        {
+          "param": "Click Level",
+          "widget": "knob"
+        }
       ]
     },
     {

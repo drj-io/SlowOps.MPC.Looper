@@ -55,6 +55,8 @@ That script keeps the triggers off the Q-Links, adds the beat boxes, and drops i
   passes through untouched.
 - **Click-free.** 10 ms seam crossfade at the loop point, 20 ms crossfade when re-capturing into a playing
   bank, and 20 ms ramps for the first capture, Clear, volume, solo and mute.
+- **Metronome.** An optional short blip on each beat (accented on the 1), only while the transport plays. It is
+  added after the loops, so it is never captured.
 - **State.** All settings are saved with the project. Captured audio is temporary.
 
 ## Limits of this prototype

@@ -174,8 +174,63 @@ static void testPerBankFeedback()
     CHECK(std::fabs(m0 / m1 - std::pow(0.5 / 0.9, 4)) < 0.05 * std::pow(0.5 / 0.9, 4), "feedback ratio %g, want %g", m0 / m1, std::pow(0.5 / 0.9, 4));
 }
 
+static void testMetronome()
+{
+    std::printf("[Metronome]\n");
+    // Off: still bit-exact pass-through.
+    {
+        Sim s; s.g.metronome = false;
+        s.input = [](int64_t t, int) { return (float)(0.2 * std::sin(0.01 * t)); };
+        s.runFor(2.0);
+        double err = 0.0;
+        for (size_t i = 0; i < s.outL.size(); ++i) err = std::fmax(err, std::fabs(s.outL[i] - s.inL[i]));
+        CHECK(err == 0.0, "metronome off changes the signal (%g)", err);
+    }
+    // On, silent input, 120 BPM 4/4: a blip starts on every beat (22050 samples), louder on the 1.
+    for (int blk : {32, 128, 509})
+    {
+        Sim s(blk); s.g.metronome = true; s.g.clickLevel = 0.5f;
+        s.runFor(4.0);
+        int clicks = 0, accents = 0, misplaced = 0;
+        double peakAll = 0.0;
+        for (size_t i = 0; i < s.outL.size(); ++i) peakAll = std::fmax(peakAll, std::fabs(s.outL[i]));
+        for (int64_t b = 0; b * 22050 < (int64_t)s.outL.size(); ++b)
+        {
+            const int64_t at = b * 22050;
+            double pk = 0.0;
+            for (int64_t i = at; i < at + 1323 && i < (int64_t)s.outL.size(); ++i) pk = std::fmax(pk, std::fabs(s.outL[(size_t)i]));
+            if (pk > 1e-3) ++clicks;
+            if ((b % 4 == 0) == (pk > 0.1)) ++accents;   // accent ~0.11 on the 1, ~0.08 otherwise
+            if (at > 0 && std::fabs(s.outL[(size_t)at - 1]) > 1e-6) ++misplaced;   // silent just before each beat
+        }
+        if (blk == 128) std::printf("  click peak %.3f (%.1f dBFS)\n", peakAll, 20 * std::log10(peakAll));
+        CHECK(clicks == 8 && accents == 8 && misplaced == 0, "block %d: %d clicks, %d accents, %d misplaced", blk, clicks, accents, misplaced);
+        CHECK(peakAll < 0.25 && peakAll > 0.05, "block %d: click peak %g out of the quiet range", blk, peakAll);
+    }
+    // Transport stopped: no click.
+    {
+        Sim s; s.g.metronome = true; s.playing = false;
+        s.runFor(2.0);
+        double pk = 0.0;
+        for (float x : s.outL) pk = std::fmax(pk, std::fabs(x));
+        CHECK(pk == 0.0, "metronome clicked with the transport stopped (%g)", pk);
+    }
+    // Not captured: a loop recorded with the metronome on contains only the input.
+    {
+        Sim s; s.g.metronome = true; s.g.captureMode = CaptureMode::RollingBar;
+        s.input = [](int64_t, int) { return 0.0f; };
+        s.runFor(2.5);
+        s.e.requestCapture(0);
+        s.runFor(0.2);
+        double pk = 0.0;
+        for (int64_t i = 0; i < s.e.loopLength(0); ++i) pk = std::fmax(pk, std::fabs(s.e.loopLeft(0)[i]));
+        CHECK(pk == 0.0, "metronome leaked into a captured loop (%g)", pk);
+    }
+}
+
 static void testBanks()
 {
+    testMetronome();
     testMultiBarCaptures();
     testBanksMix();
     testBufferPool();

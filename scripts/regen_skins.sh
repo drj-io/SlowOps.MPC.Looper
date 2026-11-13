@@ -158,7 +158,9 @@ for bank in range(3):
     nb += 11
 rep('Parameter %d' % names['Clear All'], ['Off', 'On'])
 tabs['LOOPS']['componentsData'].append(button('Clear All', 'clearall', 'Parameter %d' % names['Clear All'], 3, 3))
-nb += 1
+rep('Parameter %d' % names['Metronome'], ['Off', 'On'])
+tabs['LOOPS']['componentsData'].append(button('Metronome', 'metronome', 'Parameter %d' % names['Metronome'], 3, 0))
+nb += 2
 json.dump(d, open(t, 'w'), indent=2)
 print('patched', t, '(%d image buttons)' % nb)
 

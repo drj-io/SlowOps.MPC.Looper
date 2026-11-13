@@ -12,7 +12,7 @@ single-loop prototype. The index order is what automation and Q-Link maps use.
 
 | # | Name | Values | Default | Page | Program Q-Link | Automatable |
 |---|---|---|---|---|---|---|
-| 0 | Mix | 0–100 % (equal power, live vs. all banks) | 50 % | LOOPS | 4 | yes |
+| 0 | Mix | 0–100 % (equal power, live vs. all banks) | 50 % | MIX | 4 | yes |
 | 1 | Tone | 400 Hz … 18 kHz, 100 % = Flat | Flat | MIX | 8 | yes |
 | 2 | Drift | 0–100 % | 15 % | MIX | 12 | yes |
 | 3 | Capture Mode | Last Bar / Rolling / Next Bar | Next Bar | LOOPS | — | yes |
@@ -39,14 +39,21 @@ Per bank *n* = 1, 2, 3, at index 5 + 10 × (*n* − 1) + offset:
   - Across the top: four beat boxes. The box for the current beat lights, and the colour shows the state:
     cyan idle, orange waiting for the next 1, red recording, green playing, purple overdubbing.
   - Below them, per bank: the Bank dial, then CAPTURE, OVERDUB and CLEAR buttons.
-  - Shared column: Mix, Capture Mode and Play Mode.
+  - Shared column: METRONOME, Capture Mode, Play Mode and CLEAR ALL.
   - Each CAPTURE button shows its own bank's state in the same colours, with the state written underneath.
-- **MIX:** Volume, SOLO and MUTE per bank, with Tone and Drift.
+- **MIX:** Volume, SOLO and MUTE per bank, with Tone, Drift, Mix and Click Level.
 - **SOUND:** Length (1/2/4/8 bars) and Feedback per bank.
 - **DEBUG:** what the MPC reports and what the plugin saw, plus Loop State and Status 1–3.
 
 The buttons and the choice selectors are images with the text drawn in (`scripts/make_buttons.py`), so no text
 label sits on top of a button and taps always reach it.
+
+**Metronome.** A short blip on every beat, a little higher and louder on the 1. Click Level 50 % peaks at
+about −19 dBFS. It only sounds while the MPC transport plays. It is added to the plugin's output after the
+loops, so it is never recorded into a bank. It is part of the track's output, though, so it will be in a
+resample or a bounce of that track.
+
+Appended parameters (indices 43–45): Clear All (trigger), Metronome (Off/On), Click Level (0–100 %, default 50 %).
 
 **Solo and Mute** act on the loop banks only. The live track is always governed by Mix. When any bank is
 soloed, only the soloed banks are heard. A bank that is both muted and soloed stays muted. Muted banks keep

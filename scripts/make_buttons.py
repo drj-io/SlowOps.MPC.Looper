@@ -99,11 +99,11 @@ def main():
         button(os.path.join(OUT, "capture_%s_on.png" % name), "CAPTURE", sub, mix(fill, TEXT, 0.35), TEXT, TEXT, TEXT)
 
     # Latched / one-shot buttons: off = dark with a coloured rim, on = filled.
-    for name, title, colour in [("overdub", "OVERDUB", PURPLE), ("clear", "CLEAR", GREY), ("clearall", "CLEAR ALL", RED),
+    for name, title, colour in [("overdub", "OVERDUB", PURPLE), ("clear", "CLEAR", GREY), ("clearall", "CLEAR ALL", RED), ("metronome", "METRONOME", CYAN),
                                 ("solo", "SOLO", AMBER), ("mute", "MUTE", BLUE)]:
         button(os.path.join(OUT, "%s_off.png" % name), title, None, DARK, mix(colour, DARK, 0.25), TEXT)
         button(os.path.join(OUT, "%s_on.png" % name), title, None, colour, mix(colour, TEXT, 0.4),
-               (0x10, 0x10, 0x10) if name == "solo" else TEXT)
+               (0x10, 0x10, 0x10) if name in ("solo", "metronome") else TEXT)
     # Segment (radio) buttons for the choice parameters: one image pair per caption.
     # 3-way: 86 px wide; 4-way: 64 px. Off = dark, on = cyan fill.
     for caption, width in SEGMENTS:
