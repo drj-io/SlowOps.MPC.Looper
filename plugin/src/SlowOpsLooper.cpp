@@ -52,7 +52,7 @@ public:
     enum Extra
     {
         kBeat = kNumGlobal + kBanks * kPerBank,   // beat of the bar, 1..4: drives the 4 boxes on LOOPS
-        kDbgTransport,   // DEBUG page: what the MPC reports and what the engine saw
+        kDbgTransport,   // read-only diagnostics (no page in the release skin): what the MPC reports and what the engine saw
         kDbgPosition,
         kDbgBars,
         kDbgTaps,
@@ -76,7 +76,6 @@ public:
         kPlayTiming,     // Immediate / Bar End / Loop End: when a PLAY/STOP tap takes effect
         kPlayState1,     // read-only Play State 1..3, then Play All State: Stopped / Playing / Starting /
         kPlayStateAll = kPlayState1 + 3,   // Stopping; picks the PLAY/STOP button's image layer
-        kTestTone,       // DEBUG: steady quiet 440 Hz added to the output, independent of transport and loops
         kEnd
     };
     static constexpr int kNumParams = kEnd;
@@ -152,9 +151,6 @@ public:
             ps.automatable = false;
             addParam(ps);
         }
-        mpc::Param tone = mpc::boolParam("testtone", "Test Tone", false);
-        tone.automatable = false;
-        addParam(tone);
         if (numParams() != kNumParams) mpc::log("SlowOpsLooper: parameter count mismatch");
         // No built-in programs beyond "Default": a program writes every parameter,
         // which must never fire Capture or Clear.
@@ -304,23 +300,6 @@ public:
                 metroAutoDone_ = true;
                 if (getBool(kMetroAuto) && getInt(kMetronome) == kMetroOn) setMetronome(kMetroStandby);
             }
-        }
-
-        // DEBUG test tone: proves whether audio the plugin generates reaches the MPC's output.
-        if (getBool(kTestTone))
-        {
-            const double w = 2.0 * 3.14159265358979 * 440.0 / sampleRate();
-            const double cw = std::cos(w), sw = std::sin(w);
-            for (int i = 0; i < ctx.numFrames; ++i)
-            {
-                const double ns = toneS_ * cw + toneC_ * sw;
-                toneC_ = toneC_ * cw - toneS_ * sw; toneS_ = ns;
-                const float x = 0.1f * (float)toneS_;   // -20 dBFS
-                outL[i] += x;
-                if (outR != outL) outR[i] += x;
-            }
-            const double m = std::sqrt(toneS_ * toneS_ + toneC_ * toneC_);
-            toneS_ /= m; toneC_ /= m;
         }
 
         if (statusHoldLeft_ > 0) { statusHoldLeft_ -= ctx.numFrames; return; }
@@ -535,7 +514,6 @@ private:
         return buf;
     }
 
-    double toneS_ = 0.0, toneC_ = 1.0;
     looper::LooperEngine engine_;
     int debugMinSamples_ = 4410, debugAge_ = 0;
     int debugCounter_[kNumDebug] = {};

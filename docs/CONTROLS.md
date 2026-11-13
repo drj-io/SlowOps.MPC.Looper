@@ -45,7 +45,8 @@ Per bank *n* = 1, 2, 3, at index 5 + 10 × (*n* − 1) + offset:
 - **MIX:** Volume per bank, Play Timing (under the volumes), with Tone, Drift, Latency (next to Drift), Mix, Click Level, the Monitor switch (default On) next to Mix and the
   Auto Standby switch next to Click Level.
 - **SOUND:** Length (1/2/4/8 bars) and Feedback per bank.
-- **DEBUG:** what the MPC reports and what the plugin saw, plus Loop State and Status 1–3.
+- The read-only diagnostics (Transport, Position, Bars Seen, Taps, Last Cap, Loop Level) have no page in the release
+  skin; they are still parameters, readable from the MPC's parameter list for bug reports.
 
 The buttons and the choice selectors are images with the text drawn in (`scripts/make_buttons.py`), so no text
 label sits on top of a button and taps always reach it.

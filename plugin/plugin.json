@@ -1,7 +1,7 @@
 {
   "name": "Slow Ops Looper",
   "manufacturer": "Slow Ops",
-  "version": "2.0.0",
+  "version": "1.0.0",
   "format": "vst2",
   "kind": "effect",
   "uid": "SoLp",
@@ -10,8 +10,8 @@
   "category": "Effect",
   "file32": "VST/slow-ops-looper-arm32.so",
   "file64": "VST/slow-ops-looper-arm64.so",
-  "description": "Three-bank stereo looper insert: capture 1-8 bars from the track, overdub, let older layers fade; per-bank volume, solo and mute.",
+  "description": "Three-bank stereo looper insert for the MPC: capture 1, 2, 4 or 8 bars from the track in time with the MPC, overdub, play/stop per bank or all, metronome with auto standby, latency compensation.",
   "author": "Slow Ops",
-  "url": "",
+  "url": "https://github.com/drj-io/SlowOps.MPC.Looper",
   "license": "MIT"
 }
