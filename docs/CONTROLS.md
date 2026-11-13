@@ -22,7 +22,7 @@ Per bank *n* = 1, 2, 3, at index 5 + 10 × (*n* − 1) + offset:
 
 | +offset | Name | Values | Default | Page | Program Q-Link | Automatable |
 |---|---|---|---|---|---|---|
-| +0 | Length *n* | 1 / 2 / 4 / 8 bars (for the next capture) | 1, 2, 4 bars | SOUND | 9, 10, 11 | yes |
+| +0 | Length *n* | 1 / 2 / 4 / 8 bars (for the next capture) | 4 bars | SOUND | 9, 10, 11 | yes |
 | +1 | Volume *n* | 0–100 % (squared law, 100 % = unity) | 100 % | MIX | 1, 2, 3 | yes |
 | +2 | Feedback *n* | 0–100 % | 70 % | SOUND | 5, 6, 7 | yes |
 | +3 | Solo *n* | Off / On | Off | MIX | — | yes |
@@ -87,15 +87,15 @@ After installing a new build, save the project and restart the MPC. It only rere
 restart.
 
 1. Insert **Slow Ops Looper** on the *Ichigo* track, with drums on their own track. Play: the track sounds
-   unchanged. On LOOPS, Status 1 reads **Ready** after a bar, and Status 3 after 4 bars.
-2. Tap **Capture 1** while the motif plays. Bank 1 should loop the last bar in time, and its dial should go
-   round once per bar, showing 1/1. Capture 1 should flip back to Off by itself.
-3. Play a different part and tap **Capture 3** (4 bars). The Bank 3 dial should step through 1/4 … 4/4. Then
-   tap **Capture 2** (2 bars).
+   unchanged, and the beat boxes count 1–4 in cyan.
+2. Tap **CAPTURE** in bank 1 (every bank defaults to 4 bars and Next Bar). The beat boxes and the button turn
+   orange ("WAITING FOR 1"), red from the next 1 for four bars ("RECORDING"), then green ("PLAYING"). The Bank 1
+   dial steps through 1/4 … 4/4.
+3. Capture banks 2 and 3 the same way. On SOUND, try 1, 2 and 8 bars.
 4. On MIX: change Volume 1–3, then Solo 2, then Mute 3. Only the loops change; the live track does not.
 5. Overdub 1 on with Play Mode = On Demand: play a new phrase and leave it on. Bank 1's older layers fade at
    Feedback 1 while banks 2 and 3 stay unchanged.
-6. **Clear 2**: bank 2 fades out, and the other banks keep playing.
+6. **CLEAR** in bank 2: bank 2 fades out, and the other banks keep playing. **CLEAR ALL** empties every bank.
 7. On SOUND, set Length 1 to 8 Bars and capture again. Below 60 BPM in 4/4, Status shows **Too Long**.
 8. Record automation for Capture 2 and Mute 3, and check that it plays back. Try MIDI Learn on Volume 1.
 9. Save and reload the project: the settings come back, all banks are empty, and the dials show "--".

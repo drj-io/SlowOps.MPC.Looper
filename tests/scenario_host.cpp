@@ -26,10 +26,10 @@ static int g_fail = 0, g_pass = 0;
 // Parameter indices (plugin/src/SlowOpsLooper.cpp). Bank params: B(bank, kX), bank 0 = the bare names.
 enum P { kMix = 0, kTone, kDrift, kCapMode, kPlayMode,
          kLength, kVolume, kFeedback, kSolo, kMute, kOverdub, kCapture, kClear, kProgress, kStatus };
-static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 8;
-enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState };
+static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 9;
+enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState, kClearAll };
 static int B(int bank, int p) { return p + bank * kPerBank; }
-static bool isReadOnly(int i) { return i >= kBeat || (i >= 5 && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
+static bool isReadOnly(int i) { return (i >= kBeat && i != kClearAll) || (i >= 5 && i < kBeat && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
 static float choice(int i, int n) { return (float)i / (float)(n - 1); }
 
 // ---- host side ----------------------------------------------------------------------
@@ -68,7 +68,9 @@ struct Plug
 
     VstIntPtr disp(VstInt32 op, VstInt32 idx = 0, VstIntPtr v = 0, void* p = nullptr, float o = 0.0f) { return e->dispatcher(e, op, idx, v, p, o); }
 
-    explicit Plug(int maxBlock = 512)
+    // harness = true: drift off and lengths 1/2/4 bars, which the checks below are written for.
+    // harness = false: the plugin exactly as the MPC loads it.
+    explicit Plug(int maxBlock = 512, bool harness = true)
     {
         e = g_main(hostCallback);
         // MPC-like load + prepare sequence (see host-contract.md).
@@ -82,7 +84,13 @@ struct Plug
         e->setParameter(e, 0, p0 >= 0.5f ? 0.0f : 1.0f);
         e->setParameter(e, 0, p0);
         disp(effStartProcess);
-        set(kDrift, 0.0f);
+        if (harness)
+        {
+            set(kDrift, 0.0f);
+            set(B(0, kLength), 0.0f);              // 1 bar
+            set(B(1, kLength), 1.0f / 3.0f);       // 2 bars
+            set(B(2, kLength), 2.0f / 3.0f);       // 4 bars
+        }
     }
     ~Plug() { disp(effStopProcess); disp(effMainsChanged, 0, 0); disp(effClose); }
 
@@ -270,6 +278,7 @@ static void stateRecall()
         want.push_back({B(b, kCapture), 0.0f});
         want.push_back({B(b, kClear), 0.0f});
     }
+    want.push_back({kClearAll, 0.0f});
     CHECK((int)want.size() + 14 == kNum, "test does not cover every writable parameter");
     std::vector<uint8_t> chunk;
     std::vector<std::string> texts;
@@ -331,9 +340,11 @@ static void banksScenario()
     const double bar = p.barSamples();
     float level = 0.0f;
     p.input = [&](int64_t, int) { return level; };
-    // Defaults: Length 1 = 1 bar, Length 2 = 2 bars, Length 3 = 4 bars.
-    CHECK(p.text(B(0, kLength)) == "1 Bar" && p.text(B(1, kLength)) == "2 Bars" && p.text(B(2, kLength)) == "4 Bars",
-          "default lengths %s/%s/%s", p.text(B(0, kLength)).c_str(), p.text(B(1, kLength)).c_str(), p.text(B(2, kLength)).c_str());
+    {
+        Plug fresh(512, false);   // as loaded on the MPC: every bank defaults to 4 bars
+        CHECK(fresh.text(B(0, kLength)) == "4 Bars" && fresh.text(B(1, kLength)) == "4 Bars" && fresh.text(B(2, kLength)) == "4 Bars",
+              "default lengths %s/%s/%s", fresh.text(B(0, kLength)).c_str(), fresh.text(B(1, kLength)).c_str(), fresh.text(B(2, kLength)).c_str());
+    }
     const float L[3] = {0.1f, 0.2f, 0.4f};
     for (int b = 0; b < 3; ++b)
     {
@@ -372,6 +383,14 @@ static void banksScenario()
     CHECK(p.text(B(1, kStatus)) == "Ready" && p.text(B(1, kProgress)) == "--" && p.get(B(1, kClear)) == 0.0f,
           "clear bank 2: status %s, progress %s", p.text(B(1, kStatus)).c_str(), p.text(B(1, kProgress)).c_str());
     CHECK(p.text(B(0, kStatus)) == "Playing" && p.text(B(2, kStatus)) == "Playing", "clearing bank 2 stopped another bank");
+
+    // Clear All: every bank empties, the button resets, the live track is dry again.
+    p.set(kClearAll, 1.0f); p.runFor(0.1);
+    CHECK(p.get(kClearAll) == 0.0f, "Clear All did not self-reset");
+    CHECK(p.text(B(0, kStatus)) == "Ready" && p.text(B(2, kStatus)) == "Ready" && p.text(kLoopState) == "Idle",
+          "Clear All left a loop: %s / %s / %s", p.text(B(0, kStatus)).c_str(), p.text(B(2, kStatus)).c_str(), p.text(kLoopState).c_str());
+    level = 0.25f; p.runFor(0.05);
+    CHECK(std::fabs(p.outL.back() - 0.25f) < 1e-6, "not dry after Clear All (%g)", p.outL.back());
 
     // Automation: every control can be automated except the read-only displays.
     int bad = 0;

@@ -99,7 +99,7 @@ def main():
         button(os.path.join(OUT, "capture_%s_on.png" % name), "CAPTURE", sub, mix(fill, TEXT, 0.35), TEXT, TEXT, TEXT)
 
     # Latched / one-shot buttons: off = dark with a coloured rim, on = filled.
-    for name, title, colour in [("overdub", "OVERDUB", PURPLE), ("clear", "CLEAR", GREY),
+    for name, title, colour in [("overdub", "OVERDUB", PURPLE), ("clear", "CLEAR", GREY), ("clearall", "CLEAR ALL", RED),
                                 ("solo", "SOLO", AMBER), ("mute", "MUTE", BLUE)]:
         button(os.path.join(OUT, "%s_off.png" % name), title, None, DARK, mix(colour, DARK, 0.25), TEXT)
         button(os.path.join(OUT, "%s_on.png" % name), title, None, colour, mix(colour, TEXT, 0.4),

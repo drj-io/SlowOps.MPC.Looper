@@ -59,6 +59,7 @@ public:
         kDbgLastCapture,
         kDbgLoopLevel,
         kLoopState,      // Idle / Armed / Rec / Play / Dub: colours the beat boxes
+        kClearAll,       // trigger: clears every bank (same self-resetting behaviour as Clear n)
         kEnd
     };
     static constexpr int kNumParams = kEnd;
@@ -76,7 +77,7 @@ public:
         addParam(mpc::choiceParam("capmode", "Capture Mode", {"Last Bar", "Rolling", "Next Bar"}, 2));
         addParam(mpc::choiceParam("playmode", "Play Mode", {"Freeze", "On Demand", "Continuous"}, 1));
 
-        const int defaultLength[kBanks] = {0, 1, 2};   // 1, 2 and 4 bars
+        const int defaultLength[kBanks] = {2, 2, 2};   // 4 bars each
         for (int b = 0; b < kBanks; ++b)
         {
             const std::string n = std::to_string(b + 1);
@@ -112,6 +113,7 @@ public:
         mpc::Param state = mpc::choiceParam("loopstate", "Loop State", {"Idle", "Armed", "Rec", "Play", "Dub"}, 0);
         state.automatable = false;
         addParam(state);
+        addParam(mpc::boolParam("clearall", "Clear All", false));
         if (numParams() != kNumParams) mpc::log("SlowOpsLooper: parameter count mismatch");
         // No built-in programs beyond "Default": a program writes every parameter,
         // which must never fire Capture or Clear.
@@ -134,6 +136,7 @@ public:
         for (int b = 0; b < kBanks; ++b)
             for (int p : {kCapture, kClear})
                 if (getNormalised(idx(b, p)) >= 0.5f) { setNormalised(idx(b, p), 0.0f); notifyHostParameterChanged(idx(b, p)); }
+        if (getNormalised(kClearAll) >= 0.5f) { setNormalised(kClearAll, 0.0f); notifyHostParameterChanged(kClearAll); }
         statusHoldLeft_ = statusHoldSamples_;
     }
 
@@ -156,6 +159,13 @@ public:
                 notifyHostParameterChanged(idx(b, kClear));
                 engine_.requestClear(b);
             }
+        }
+
+        if (getNormalised(kClearAll) >= 0.5f)
+        {
+            setNormalised(kClearAll, 0.0f);
+            notifyHostParameterChanged(kClearAll);
+            for (int b = 0; b < kBanks; ++b) engine_.requestClear(b);
         }
 
         looper::GlobalParams g;

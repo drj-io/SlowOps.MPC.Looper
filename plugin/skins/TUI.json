@@ -807,6 +807,13 @@
         ]
       },
       {
+        "key": "Parameter 43",
+        "value": [
+          "Off",
+          "On"
+        ]
+      },
+      {
         "key": "Parameter 3",
         "value": [
           "Last Bar",
@@ -2631,6 +2638,35 @@
                 "whenVisible": "Always",
                 "boundsType": "Absolute",
                 "bounds": "678 509 248 84"
+              }
+            },
+            {
+              "version": 2,
+              "componentData": {
+                "version": 1,
+                "name": "Clear All",
+                "type": "Button",
+                "data": {
+                  "version": 2,
+                  "onImage": "clearall_on.png",
+                  "offImage": "clearall_off.png",
+                  "buttonId": 1,
+                  "numButtonsInGroup": 1,
+                  "handleName": "Parameter 43",
+                  "gestureBehaviour": "Instant"
+                }
+              },
+              "handle remapping": {
+                "version": 1,
+                "map": []
+              },
+              "bounds": {
+                "version": 1,
+                "acceptsHWFocus": "No",
+                "showWhenDataModelInvalid": "Hide",
+                "whenVisible": "Always",
+                "boundsType": "Absolute",
+                "bounds": "998 509 248 84"
               }
             },
             {

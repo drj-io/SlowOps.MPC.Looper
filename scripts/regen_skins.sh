@@ -156,6 +156,9 @@ for bank in range(3):
     tabs['MIX']['componentsData'].append(button('Solo %d' % n, 'solo', P('Solo'), bank, 1))
     tabs['MIX']['componentsData'].append(button('Mute %d' % n, 'mute', P('Mute'), bank, 2))
     nb += 11
+rep('Parameter %d' % names['Clear All'], ['Off', 'On'])
+tabs['LOOPS']['componentsData'].append(button('Clear All', 'clearall', 'Parameter %d' % names['Clear All'], 3, 3))
+nb += 1
 json.dump(d, open(t, 'w'), indent=2)
 print('patched', t, '(%d image buttons)' % nb)
 
