@@ -1,0 +1,22 @@
+{
+  "kit": "cyan",
+  "pages": [
+    {
+      "name": "LOOP",
+      "controls": [
+        { "param": "Feedback", "widget": "knob" },
+        { "param": "Tone", "widget": "knob" },
+        { "param": "Drift", "widget": "knob" },
+        { "param": "Mix", "widget": "fader" },
+        { "param": "Capture", "widget": "switch" },
+        { "param": "Overdub", "widget": "switch" },
+        { "param": "Clear", "widget": "switch" },
+        { "param": "Status", "widget": "slider" },
+        { "param": "Capture Mode", "widget": "switch" },
+        { "param": "Play Mode", "widget": "switch" },
+        "empty",
+        "empty"
+      ]
+    }
+  ]
+}

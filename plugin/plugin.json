@@ -1,0 +1,17 @@
+{
+  "name": "Slow Ops Looper",
+  "manufacturer": "Slow Ops",
+  "version": "1.0.0",
+  "format": "vst2",
+  "kind": "effect",
+  "uid": "SoLp",
+  "numInputs": 2,
+  "numOutputs": 2,
+  "category": "Effect",
+  "file32": "VST/slow-ops-looper-arm32.so",
+  "file64": "VST/slow-ops-looper-arm64.so",
+  "description": "One-bar stereo looper insert: capture a bar from the track, overdub, let older layers fade.",
+  "author": "Slow Ops",
+  "url": "",
+  "license": "MIT"
+}
