@@ -27,10 +27,15 @@ static float choice(int i, int n) { return (float)i / (float)(n - 1); }
 
 // ---- host side ----------------------------------------------------------------------
 static VstTimeInfo g_time{};
-static VstIntPtr hostCallback(AEffect*, VstInt32 opcode, VstInt32, VstIntPtr, void* ptr, float)
+static int   g_automateCount[16] = {};
+static float g_automateValue[16] = {};
+static VstIntPtr hostCallback(AEffect*, VstInt32 opcode, VstInt32 index, VstIntPtr, void* ptr, float opt)
 {
     switch (opcode)
     {
+        case audioMasterAutomate:   // the plugin telling the host a value changed
+            if (index >= 0 && index < 16) { ++g_automateCount[index]; g_automateValue[index] = opt; }
+            return 0;
         case audioMasterVersion: return 2400;
         case audioMasterGetTime: return (VstIntPtr)&g_time;
         case audioMasterGetVendorString: if (ptr) std::strcpy((char*)ptr, "MPC 3"); return 1;
@@ -143,10 +148,16 @@ static void lastCompleteBar()
     CHECK(p.text(kStatus) == "No Hist" && p.get(kCapture) == 0.0f, "early capture: status %s capture=%g", p.text(kStatus).c_str(), p.get(kCapture));
     p.runUntil((int64_t)(2.5 * bar));
     CHECK(p.text(kStatus) == "Ready", "status mid bar 3 = %s", p.text(kStatus).c_str());
+    const int before = g_automateCount[kCapture];
     p.set(kCapture, 1.0f);
     p.block(128);
     CHECK(p.get(kCapture) == 0.0f && p.text(kCapture) == "Off", "Capture did not self-reset (%g)", p.get(kCapture));
+    CHECK(g_automateCount[kCapture] == before + 1 && g_automateValue[kCapture] == 0.0f,
+          "host not told that Capture went back to Off (count %d, value %g)", g_automateCount[kCapture] - before, g_automateValue[kCapture]);
+    const int statusBefore = g_automateCount[kStatus];
     CHECK(p.runUntilStatus("Playing"), "never Playing (status %s)", p.text(kStatus).c_str());
+    CHECK(g_automateCount[kStatus] > statusBefore && std::fabs(g_automateValue[kStatus] - 4.0f / 6.0f) < 1e-6,
+          "host not told about the Status change (value %g)", g_automateValue[kStatus]);
     p.runUntil((int64_t)(5.0 * bar));
     double err = 0.0;
     const int64_t seam = 441;

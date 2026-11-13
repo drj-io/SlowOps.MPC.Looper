@@ -22,4 +22,20 @@ for e in d['Screen Mode Q-Links']['map']:
 d['Program Mode Q-Links'] = {'Q-Link %d' % q: (q - 1 if q <= 7 else -1) for q in range(1, 17)}
 json.dump(d, open(p, 'w'), indent=2)
 print('patched', p)
+
+# Segment captions: gen_ui (SDK febd2ca) binds them to an unresolved "Data" handle
+# with showWhenDataModelInvalid "Hide", so the MPC hides them (seen on hardware).
+# Show them unconditionally and shrink the font so "Continuous" fits 80 px.
+t = 'plugin/skins/TUI.json'
+d = json.load(open(t))
+n = 0
+for tab in d['pageData']['tabs']:
+    for e in tab['componentDefinition']['componentsData']:
+        cd = e['componentData']
+        if cd['type'] == 'Label' and ' seg ' in cd['name']:
+            e['bounds']['showWhenDataModelInvalid'] = 'Show'
+            cd['data']['textStyle']['font']['height'] = 18.0
+            n += 1
+json.dump(d, open(t, 'w'), indent=2)
+print('patched', t, '(%d segment captions)' % n)
 PY

@@ -74,16 +74,29 @@ public:
     void reset() override
     {
         engine_.reset();
-        if (getNormalised(kCapture) != 0.0f) setNormalised(kCapture, 0.0f);
-        if (getNormalised(kClear) != 0.0f) setNormalised(kClear, 0.0f);
+        if (getNormalised(kCapture) != 0.0f) { setNormalised(kCapture, 0.0f); notifyHostParameterChanged(kCapture); }
+        if (getNormalised(kClear) != 0.0f)   { setNormalised(kClear, 0.0f);   notifyHostParameterChanged(kClear); }
         statusHoldLeft_ = statusHoldSamples_;
     }
 
     void process(mpc::ProcessContext& ctx) override
     {
-        // Triggers: On means "fire once"; the plugin sets them back to Off.
-        if (getNormalised(kCapture) >= 0.5f) { setNormalised(kCapture, 0.0f); engine_.requestCapture(); }
-        if (getNormalised(kClear) >= 0.5f)   { setNormalised(kClear, 0.0f);   engine_.requestClear(); }
+        // Triggers: On means "fire once"; the plugin sets them back to Off and tells
+        // the host (audioMasterAutomate), so the MPC's own copy of the value and the
+        // switch on screen follow. Without this the MPC kept showing "On" (hardware
+        // test, MPC OS 3.10.1) and the next tap would send Off instead of firing.
+        if (getNormalised(kCapture) >= 0.5f)
+        {
+            setNormalised(kCapture, 0.0f);
+            notifyHostParameterChanged(kCapture);
+            engine_.requestCapture();
+        }
+        if (getNormalised(kClear) >= 0.5f)
+        {
+            setNormalised(kClear, 0.0f);
+            notifyHostParameterChanged(kClear);
+            engine_.requestClear();
+        }
 
         looper::Params p;
         p.feedback = get(kFeedback) * 0.01f;
@@ -113,7 +126,11 @@ public:
 
         if (statusHoldLeft_ > 0) { statusHoldLeft_ -= ctx.numFrames; return; }
         const float statusNorm = param(kStatus).toNormalised((float)engine_.status());
-        if (getNormalised(kStatus) != statusNorm) setNormalised(kStatus, statusNorm);
+        if (getNormalised(kStatus) != statusNorm)
+        {
+            setNormalised(kStatus, statusNorm);
+            notifyHostParameterChanged(kStatus);   // a few times per capture at most
+        }
     }
 
     // Tone shows the cutoff it sets, e.g. "2.4k", or "Flat" at 100 %.
