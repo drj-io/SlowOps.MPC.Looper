@@ -1,10 +1,11 @@
 # Slow Ops Looper
 
-A one-bar stereo looper used as an insert effect on Akai MPC standalone hardware, by Slow Ops.
+A three-bank stereo looper used as an insert effect on Akai MPC standalone hardware, by Slow Ops.
 
-You capture a bar from the track (Last Bar, Rolling or Next Bar), then freeze it or overdub onto it. Feedback
-sets how much of each earlier pass survives, so older layers fade while the project keeps playing. Tone darkens
-the loop, Drift adds slow tape wow, and Mix blends the live track with the loop.
+Each bank captures 1, 2, 4 or 8 bars from the track (Last Bar, Rolling or Next Bar), then freezes it or
+overdubs onto it. Each bank's Feedback sets how much of each earlier pass survives, so older layers fade while
+the project keeps playing. Each bank has its own volume, solo, mute and a progress dial. Tone darkens the loops,
+Drift adds slow tape wow, and Mix blends the live track with the loops.
 
 ## Install
 
@@ -16,11 +17,16 @@ the loop, Drift adds slow tape wow, and Mix blends the live track with the loop.
 
 ## Controls
 
-- **Feedback, Tone, Drift, Mix**: knobs on screen and Q-Links 1–4.
-- **Capture Mode** and **Play Mode**: segment switches.
-- **Capture** and **Clear**: tap them. They fire once and switch back off.
-- **Overdub**: stays on until you tap it again.
-- **Status**: shows No Hist, Ready, Armed, Rec Bar, Playing, Overdub or Too Long.
+Each page has one column per bank. The fourth column holds the shared controls.
+
+- **LOOPS:** progress dials (bar/bars), Status, Capture and Overdub per bank, plus Mix, Capture Mode and Play
+  Mode.
+- **MIX:** Volume, Solo, Mute and Clear per bank, plus Tone and Drift.
+- **SOUND:** Length (1/2/4/8 bars) and Feedback per bank.
+- **Capture** and **Clear**: tap them. They fire once and switch back off. **Overdub** stays on until you tap it
+  again.
+- **Q-Links in Program mode:** Volume 1–3 and Mix on 1–4, Feedback 1–3 and Tone on 5–8, Length 1–3 and Drift on
+  9–12.
 
 Full details are in `docs/CONTROLS.md` in the source repository.
 

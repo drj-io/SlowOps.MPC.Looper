@@ -1,8 +1,10 @@
 # Slow Ops Looper
 
-A one-bar stereo looper for use as an insert effect on the Akai MPC standalone (built and tested for the Live III, MPC OS 3.10.1+).
-You capture a bar from the track, overdub on top of it, and the older layers fade while the rest of the
-project keeps playing. This repository holds the first working prototype.
+A stereo looper with three loop banks, for use as an insert effect on the Akai MPC standalone
+(MPC OS 3.10.1+; tested on an MPC XL, built for the Live III and other 64-bit MPCs).
+Each bank captures 1, 2, 4 or 8 bars from the track. You overdub on top, and the older layers fade while the
+rest of the project keeps playing. Each bank has its own volume, solo, mute and a progress dial.
+This repository holds the working prototype.
 
 ## Layout
 
@@ -32,37 +34,37 @@ and keeps the triggers off the Q-Links.
 
 ## How it behaves
 
-- **Capture modes**:
-  - **Last Bar** (default) grabs the latest finished bar.
-  - **Rolling** grabs one bar's worth of audio ending at the tap.
-  - **Next Bar** arms, then records from the next downbeat for one bar.
-- **Play modes**:
+- **Banks.** There are three independent loops. Each has a Length (1, 2, 4 or 8 bars), Feedback, Volume, Solo,
+  Mute, Capture, Overdub and Clear, plus a progress dial and a Status display. Capture Mode, Play Mode, Tone,
+  Drift and Mix are shared.
+- **Capture modes** (N = the bank's length):
+  - **Last Bar** takes the last N complete bars.
+  - **Rolling** takes the N bars ending at the tap.
+  - **Next Bar** arms, then records N bars from the next downbeat.
+  - In every mode the loop continues seamlessly from where the captured audio ended.
+- **Play modes:**
   - **Freeze** repeats the loop.
-  - **On Demand** (default) adds incoming audio while **Overdub** is on.
-  - **Continuous** adds incoming audio on every pass.
-  - While overdubbing, `loop = softclip(tone(loop) × Feedback + input)`, so each pass keeps Feedback × the previous one.
-- **Timing**: tempo, time signature and bar position come from the MPC transport, and the loop phase-locks to
-  host downbeats. When the transport is stopped, an internal bar clock at the project tempo keeps capture and
-  playback running.
-- **Mix**: an equal-power blend. Before the first capture, and after Clear, the track passes through untouched
-  whatever Mix is set to.
-- **Click-free**:
-  - 10 ms seam crossfade at the loop point.
-  - 20 ms crossfade between an old loop and a new capture.
-  - 20 ms fade on the first capture and on Clear.
-  - 10 ms ramp when overdub engages.
-- **Status** shows No Hist, Ready, Armed, Rec Bar, Playing, Overdub or Too Long. A refused capture shows
-  *No Hist* or *Too Long* for 2 s.
-- **State**: all settings are saved with the project. Captured audio is temporary and is not saved.
+  - **On Demand** overdubs each bank while its Overdub is on.
+  - **Continuous** overdubs every bank on every pass.
+  - Overdubbing writes `loop = softclip(tone(loop) × Feedback + input)`.
+- **Timing.** Tempo, time signature and bar position come from the MPC transport. Loops snap to the host's bar
+  lines. While the transport is stopped, an internal bar clock at the project tempo keeps everything running.
+- **Mix.** An equal-power blend of the live track and the sum of the banks. Before any capture, the track
+  passes through untouched.
+- **Click-free.** 10 ms seam crossfade at the loop point, 20 ms crossfade when re-capturing into a playing
+  bank, and 20 ms ramps for the first capture, Clear, volume, solo and mute.
+- **State.** All settings are saved with the project. Captured audio is temporary.
 
 ## Limits of this prototype
 
-- The longest bar is 6 s, i.e. 40 BPM in 4/4. A slower tempo shows *Too Long*.
-- If the tempo changes after a capture, the loop keeps its captured length and stops snapping to downbeats.
-- The loop survives a buffer-size change but not a sample-rate change (the MPC is fixed at 44.1 kHz).
-- Memory is about 8.5 MB per instance, all allocated in `prepare()`: 2 × 6 s loop buffers plus about 12.6 s of history.
-- CPU on the host_sim desktop run is < 0.1 % per block. ARM numbers still have to be measured on the Live III.
-- The prototype is only verified in simulation; hardware checks are listed in `docs/CONTROLS.md`.
+- Each bank holds up to 32 s. That's 8 bars down to 60 BPM in 4/4, or 4 bars down to 30 BPM. A longer bank
+  shows *Too Long*.
+- Memory is about 58 MB per instance, all allocated in `prepare()`: 4 pooled 32 s stereo buffers (3 banks plus
+  a spare for crossfading re-captures) and 37 s of history.
+- A loop keeps its captured length. If the tempo changes, it stops snapping to bar lines. Changing Length only
+  affects the next capture.
+- One capture copies at a time: re-capturing several full banks at once queues them, each a few ms apart.
+- CPU is < 0.2 % per block on the desktop simulator. ARM figures still need measuring on the MPC.
 
 ## Licence
 

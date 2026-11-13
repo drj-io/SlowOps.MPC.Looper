@@ -22,19 +22,24 @@
 static int g_fail = 0, g_pass = 0;
 #define CHECK(cond, ...) do { if (cond) { ++g_pass; } else { ++g_fail; std::printf("  FAIL %s:%d: ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
 
-enum P { kFeedback, kTone, kDrift, kMix, kCapMode, kPlayMode, kOverdub, kCapture, kClear, kStatus, kNum };
+// Parameter indices (plugin/src/SlowOpsLooper.cpp). Bank params: B(bank, kX), bank 0 = the bare names.
+enum P { kMix = 0, kTone, kDrift, kCapMode, kPlayMode,
+         kLength, kVolume, kFeedback, kSolo, kMute, kOverdub, kCapture, kClear, kProgress, kStatus };
+static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank;
+static int B(int bank, int p) { return p + bank * kPerBank; }
+static bool isReadOnly(int i) { return i >= 5 && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9); }
 static float choice(int i, int n) { return (float)i / (float)(n - 1); }
 
 // ---- host side ----------------------------------------------------------------------
 static VstTimeInfo g_time{};
-static int   g_automateCount[16] = {};
-static float g_automateValue[16] = {};
+static int   g_automateCount[64] = {};
+static float g_automateValue[64] = {};
 static VstIntPtr hostCallback(AEffect*, VstInt32 opcode, VstInt32 index, VstIntPtr, void* ptr, float opt)
 {
     switch (opcode)
     {
         case audioMasterAutomate:   // the plugin telling the host a value changed
-            if (index >= 0 && index < 16) { ++g_automateCount[index]; g_automateValue[index] = opt; }
+            if (index >= 0 && index < 64) { ++g_automateCount[index]; g_automateValue[index] = opt; }
             return 0;
         case audioMasterVersion: return 2400;
         case audioMasterGetTime: return (VstIntPtr)&g_time;
@@ -149,12 +154,12 @@ static void lastCompleteBar()
     p.runUntil((int64_t)(2.5 * bar));
     CHECK(p.text(kStatus) == "Ready", "status mid bar 3 = %s", p.text(kStatus).c_str());
     const int before = g_automateCount[kCapture];
+    const int statusBefore = g_automateCount[kStatus];
     p.set(kCapture, 1.0f);
     p.block(128);
     CHECK(p.get(kCapture) == 0.0f && p.text(kCapture) == "Off", "Capture did not self-reset (%g)", p.get(kCapture));
     CHECK(g_automateCount[kCapture] == before + 1 && g_automateValue[kCapture] == 0.0f,
           "host not told that Capture went back to Off (count %d, value %g)", g_automateCount[kCapture] - before, g_automateValue[kCapture]);
-    const int statusBefore = g_automateCount[kStatus];
     CHECK(p.runUntilStatus("Playing"), "never Playing (status %s)", p.text(kStatus).c_str());
     CHECK(g_automateCount[kStatus] > statusBefore && std::fabs(g_automateValue[kStatus] - 4.0f / 6.0f) < 1e-6,
           "host not told about the Status change (value %g)", g_automateValue[kStatus]);
@@ -242,8 +247,21 @@ static void feedbackDecay()
 
 static void stateRecall()
 {
-    std::printf("[State recall]\n");
-    const float want[kStatus] = {0.42f, 0.37f, 0.0f, 0.8f, choice(2, 3), choice(2, 3), 1.0f, 0.0f, 0.0f};
+    std::printf("[State recall: every writable parameter, all banks]\n");
+    std::vector<std::pair<int, float>> want = {
+        {kMix, 0.8f}, {kTone, 0.37f}, {kDrift, 0.0f}, {kCapMode, choice(2, 3)}, {kPlayMode, choice(2, 3)}};
+    for (int b = 0; b < 3; ++b)
+    {
+        want.push_back({B(b, kLength), choice((b + 1) % 4, 4)});
+        want.push_back({B(b, kVolume), 0.3f + 0.2f * b});
+        want.push_back({B(b, kFeedback), 0.42f + 0.1f * b});
+        want.push_back({B(b, kSolo), b == 1 ? 1.0f : 0.0f});
+        want.push_back({B(b, kMute), b == 2 ? 1.0f : 0.0f});
+        want.push_back({B(b, kOverdub), b == 0 ? 1.0f : 0.0f});
+        want.push_back({B(b, kCapture), 0.0f});
+        want.push_back({B(b, kClear), 0.0f});
+    }
+    CHECK((int)want.size() + 6 == kNum, "test does not cover every writable parameter");
     std::vector<uint8_t> chunk;
     std::vector<std::string> texts;
     {
@@ -254,26 +272,27 @@ static void stateRecall()
         a.set(kCapture, 1.0f);
         a.runUntilStatus("Playing");
         CHECK(a.text(kStatus) == "Playing", "setup: no loop captured");
-        for (int i = 0; i < kStatus; ++i) a.set(i, want[i]);
+        for (auto& w : want) a.set(w.first, w.second);
         a.runFor(0.05);
         void* ptr = nullptr;
         const VstIntPtr n = a.disp(effGetChunk, 0, 0, &ptr);
         CHECK(n > 0 && ptr != nullptr, "effGetChunk returned %ld", (long)n);
         chunk.assign((const uint8_t*)ptr, (const uint8_t*)ptr + n);
-        for (int i = 0; i < kStatus; ++i) texts.push_back(a.text(i));
-        std::printf("  saved: ");
-        for (int i = 0; i < kStatus; ++i) std::printf("%s ", texts[(size_t)i].c_str());
-        std::printf("(%zu bytes)\n", chunk.size());
+        for (auto& w : want) texts.push_back(a.text(w.first));
+        std::printf("  saved %zu values (%zu bytes): ", want.size(), chunk.size());
+        for (size_t i = 0; i < 9; ++i) std::printf("%s ", texts[i].c_str());
+        std::printf("...\n");
     }
     // Project reload: a fresh instance, state restored, then audio starts.
     Plug b;
     b.disp(effSetChunk, 0, (VstIntPtr)chunk.size(), chunk.data());
     b.input = [](int64_t t, int ch) { return (float)(0.3 * std::sin(0.02 * t + ch)); };
     b.runFor(0.5);
-    for (int i = 0; i < kStatus; ++i)
+    for (size_t k = 0; k < want.size(); ++k)
     {
-        CHECK(std::fabs(b.get(i) - want[i]) < 1e-4, "param %d: %g after reload, want %g", i, b.get(i), want[i]);
-        CHECK(b.text(i) == texts[(size_t)i], "param %d text: %s after reload, want %s", i, b.text(i).c_str(), texts[(size_t)i].c_str());
+        const int i = want[k].first;
+        CHECK(std::fabs(b.get(i) - want[k].second) < 1e-4, "param %d: %g after reload, want %g", i, b.get(i), want[k].second);
+        CHECK(b.text(i) == texts[k], "param %d text: %s after reload, want %s", i, b.text(i).c_str(), texts[k].c_str());
     }
     double err = 0.0;
     for (size_t i = 0; i < b.outL.size(); ++i) err = std::fmax(err, std::fabs(b.outL[i] - b.inL[i]));
@@ -293,6 +312,62 @@ static void stateRecall()
     d.disp(effSetChunk, 0, (VstIntPtr)armedChunk.size(), armedChunk.data());
     d.runFor(1.0);
     CHECK(d.get(kCapture) == 0.0f && d.text(kStatus) == "Ready", "state load fired Capture (status %s, capture %g)", d.text(kStatus).c_str(), d.get(kCapture));
+}
+
+static void banksScenario()
+{
+    std::printf("[Three banks via the plugin: 1/2/4 bars, progress dials, solo, mute, volume]\n");
+    Plug p; p.set(kMix, 1.0f);
+    const double bar = p.barSamples();
+    float level = 0.0f;
+    p.input = [&](int64_t, int) { return level; };
+    // Defaults: Length 1 = 1 bar, Length 2 = 2 bars, Length 3 = 4 bars.
+    CHECK(p.text(B(0, kLength)) == "1 Bar" && p.text(B(1, kLength)) == "2 Bars" && p.text(B(2, kLength)) == "4 Bars",
+          "default lengths %s/%s/%s", p.text(B(0, kLength)).c_str(), p.text(B(1, kLength)).c_str(), p.text(B(2, kLength)).c_str());
+    const float L[3] = {0.1f, 0.2f, 0.4f};
+    for (int b = 0; b < 3; ++b)
+    {
+        level = L[b];
+        p.runUntil(p.t + (int64_t)(5.3 * bar));
+        p.set(B(b, kCapture), 1.0f);
+        p.runFor(0.2);
+        CHECK(p.text(B(b, kStatus)) == "Playing", "bank %d status %s", b + 1, p.text(B(b, kStatus)).c_str());
+    }
+    level = 0.0f;
+    p.runFor(0.3);
+    CHECK(std::fabs(p.outL.back() - 0.7f) < 1e-4, "3 banks summed: %g, want 0.7", p.outL.back());
+
+    // Progress dials: move, are quantised to 16ths, and the MPC is told.
+    const int before = g_automateCount[B(2, kProgress)];
+    const float p0 = p.get(B(2, kProgress));
+    p.runFor(1.0);
+    const float p1 = p.get(B(2, kProgress));
+    std::printf("  bank 3 progress %.3f -> %.3f (\"%s\"), %d host updates in 1 s\n", p0, p1, p.text(B(2, kProgress)).c_str(),
+                g_automateCount[B(2, kProgress)] - before);
+    CHECK(p1 != p0 && std::fabs(p1 * 64.0f - std::round(p1 * 64.0f)) < 1e-4, "bank 3 progress not moving in 1/64 steps (%g -> %g)", p0, p1);
+    const int updates = g_automateCount[B(2, kProgress)] - before;
+    CHECK(updates >= 5 && updates <= 26, "progress host updates per second: %d", updates);
+    const std::string t3 = p.text(B(2, kProgress));
+    CHECK(t3.size() == 3 && t3[1] == '/' && t3[2] == '4', "bank 3 progress text \"%s\", want n/4", t3.c_str());
+    CHECK(p.text(B(0, kProgress)) == "1/1", "bank 1 progress text \"%s\"", p.text(B(0, kProgress)).c_str());
+
+    p.set(B(1, kMute), 1.0f);  p.runFor(0.05);
+    CHECK(std::fabs(p.outL.back() - 0.5f) < 1e-4, "mute bank 2: %g, want 0.5", p.outL.back());
+    p.set(B(0, kSolo), 1.0f);  p.runFor(0.05);
+    CHECK(std::fabs(p.outL.back() - 0.1f) < 1e-4, "solo bank 1: %g, want 0.1", p.outL.back());
+    p.set(B(0, kSolo), 0.0f); p.set(B(1, kMute), 0.0f); p.set(B(2, kVolume), 0.5f); p.runFor(0.05);
+    CHECK(std::fabs(p.outL.back() - 0.4f) < 1e-4, "bank 3 at 50 %%: %g, want 0.3 + 0.1", p.outL.back());
+
+    p.set(B(1, kClear), 1.0f); p.runFor(0.1);
+    CHECK(p.text(B(1, kStatus)) == "Ready" && p.text(B(1, kProgress)) == "--" && p.get(B(1, kClear)) == 0.0f,
+          "clear bank 2: status %s, progress %s", p.text(B(1, kStatus)).c_str(), p.text(B(1, kProgress)).c_str());
+    CHECK(p.text(B(0, kStatus)) == "Playing" && p.text(B(2, kStatus)) == "Playing", "clearing bank 2 stopped another bank");
+
+    // Automation: every control can be automated except the read-only displays.
+    int bad = 0;
+    for (int i = 0; i < kNum; ++i)
+        if ((p.disp(effCanBeAutomated, i) != 0) == isReadOnly(i)) ++bad;
+    CHECK(bad == 0, "%d parameters have the wrong automatable flag", bad);
 }
 
 static void automationThreadTriggers()
@@ -441,6 +516,7 @@ int main(int argc, char** argv)
     feedbackDecay();
     stateRecall();
     automationThreadTriggers();
+    banksScenario();
     ichigoRender(outDir);
 
     std::printf("\nscenario_host: %d passed, %d failed\n", g_pass, g_fail);

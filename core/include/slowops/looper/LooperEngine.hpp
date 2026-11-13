@@ -1,22 +1,28 @@
-// LooperEngine.hpp - one stereo, bar-length loop per instance.
+// LooperEngine.hpp - three stereo loop banks, each 1/2/4/8 bars long.
 //
 // Host-agnostic core of Slow Ops Looper (std library only; no plugin SDK).
 // SPDX-License-Identifier: MIT
 //
 // Signal flow (per sample):
 //
-//   in ──┬──────────────────────────────────────────────► dry ─┐
-//        ├──► history ring (always recording the dry input)    ├─► out = dry*dryGain + loop*wetGain
-//        │        │ capture window [start, end) copied         │
-//        │        ▼ (chunked, then seam crossfade)             │
-//        │     loop buffer A/B ──► drift read ──► tone LP ─────┘
-//        │        ▲    │
-//        └────────┘    └──► overdub write: loop = softclip(toneLP(loop) * feedback + in)
+//   in ──┬────────────────────────────────────────────────────────► dry ──┐
+//        ├──► history ring (always recording the dry input)              │
+//        │       │ capture window (N bars) copied into a free buffer      ├─► out = dry*dryGain
+//        │       ▼                                                        │        + wetGain * Σ bank
+//        │    bank 1..3: loop ──► drift read ──► tone LP ──► vol/solo/mute ┘
+//        │        ▲   │
+//        └────────┘   └──► overdub write: loop = softclip(toneLP(loop) * feedback + in)
 //
-// Capture windows (all three modes pick a range of history):
-//   Last Complete Bar  [previous downbeat, last downbeat)
-//   Rolling Bar        [now - bar, now)
-//   Next Bar           [next downbeat, next downbeat + bar)  (armed until then)
+// Capture windows (N = the bank's length in bars):
+//   Last Complete Bar  the last N complete bars, [downbeat(k-N), downbeat(k))
+//   Rolling Bar        [now - N bars, now)
+//   Next Bar           [next downbeat, + N bars)  (armed until then)
+// Every window keeps playing seamlessly from "now", so the loop continues the
+// music in time with the host's bars.
+//
+// Memory: kNumBanks + 1 loop buffers of maxLoopSeconds are pooled. The spare
+// buffer receives a new capture so a bank that is already playing can crossfade
+// from its old loop to the new one; the old buffer then becomes the spare.
 //
 // Thread model: prepare()/reset() on a non-realtime thread (or between
 // blocks); process() on the audio thread; requestCapture()/requestClear() from
@@ -37,65 +43,84 @@ namespace slowops::looper {
 enum class CaptureMode : int { LastCompleteBar = 0, RollingBar = 1, NextBar = 2 };
 enum class PlaybackMode : int { Freeze = 0, OverdubOnDemand = 1, ContinuousOverdub = 2 };
 
-// Order matters: the MPC adapter maps this 1:1 onto its Status choice parameter.
+// Order matters: the MPC adapter maps this 1:1 onto its Status choice parameters.
 enum class Status : int
 {
-    NoHistory = 0,   // not enough audio history to capture in the current mode
+    NoHistory = 0,   // not enough audio history to capture this bank's length
     Ready,           // capture would succeed now
     Armed,           // Next Bar waiting for the downbeat, or a capture being copied
-    Recording,       // Next Bar recording its bar
+    Recording,       // Next Bar recording
     Playing,         // loop playing
     Overdubbing,     // loop playing and taking new audio
-    TooLong          // one bar is longer than the loop memory (very slow tempo)
+    TooLong          // the bank's length is longer than the loop memory at this tempo
 };
 
-struct Params
+struct GlobalParams
 {
-    float feedback = 0.7f;   // 0..1  share of the previous pass kept while overdubbing
-    float tone = 1.0f;       // 0..1  loop lowpass, 400 Hz .. 18 kHz (1 = flat)
-    float drift = 0.15f;     // 0..1  tape wow depth on loop playback
-    float mix = 0.5f;        // 0..1  equal-power live/loop blend (dry only while no loop)
+    float tone = 1.0f;    // 0..1  loop lowpass, 400 Hz .. 18 kHz (1 = flat)
+    float drift = 0.15f;  // 0..1  tape wow depth on loop playback
+    float mix = 0.5f;     // 0..1  equal-power live/loops blend (dry only while no loop exists)
     CaptureMode  captureMode = CaptureMode::LastCompleteBar;
     PlaybackMode playbackMode = PlaybackMode::OverdubOnDemand;
-    bool overdub = false;    // used by OverdubOnDemand
+};
+
+struct BankParams
+{
+    int   lengthBars = 1;    // 1, 2, 4 or 8; applies to the next capture
+    float feedback = 0.7f;   // 0..1  share of the previous pass kept while overdubbing
+    float volume = 1.0f;     // 0..1  (squared law: 1 = unity)
+    bool  solo = false;      // when any bank is soloed, only soloed banks are heard
+    bool  mute = false;
+    bool  overdub = false;   // used by OverdubOnDemand
 };
 
 class LooperEngine
 {
 public:
+    static constexpr int    kNumBanks     = 3;
+    static constexpr int    kNumBuffers   = kNumBanks + 1;
     static constexpr double kSeamSeconds  = 0.010;   // loop seam crossfade
     static constexpr double kSwapSeconds  = 0.020;   // old loop -> new loop crossfade
     static constexpr double kFadeSeconds  = 0.020;   // loop presence fade (first capture / clear)
+    static constexpr double kGainSeconds  = 0.020;   // volume / solo / mute ramps
     static constexpr double kDubSeconds   = 0.010;   // overdub engage ramp
     static constexpr double kHoldSeconds  = 2.0;     // how long a refused capture stays on screen
     static constexpr double kMaxDriftSec  = 0.006;   // max drift read offset
-    static constexpr int64_t kCopyChunk   = 32768;   // frames copied per block
+    static constexpr int64_t kCopyChunk   = 131072;  // frames copied per block (memcpy)
     static constexpr int64_t kCopyMargin  = 16384;   // history kept free for in-flight copies
+    static constexpr int    kMaxDownbeats = 16;
 
     // ---- setup (allocates) -------------------------------------------------
-    void prepare(double sampleRate, int maxBlockSize, double maxBarSeconds = 6.0)
+    // maxLoopSeconds: longest loop per bank. extraHistorySeconds: history beyond
+    // that, so "last N complete bars" still fits when pressed late in a bar.
+    void prepare(double sampleRate, int maxBlockSize, double maxLoopSeconds = 32.0, double extraHistorySeconds = 5.0)
     {
         (void)maxBlockSize;
-        const bool srChanged = sampleRate != sr_ || maxBarSeconds != maxBarSec_;
+        const bool changed = sampleRate != sr_ || maxLoopSeconds != maxLoopSec_ || extraHistorySeconds != extraHistSec_;
         sr_ = sampleRate;
-        maxBarSec_ = maxBarSeconds;
-        maxLen_ = (int64_t)std::ceil(maxBarSeconds * sampleRate);
+        maxLoopSec_ = maxLoopSeconds;
+        extraHistSec_ = extraHistorySeconds;
+        maxLen_ = (int64_t)std::ceil(maxLoopSeconds * sampleRate);
         seam_ = (int64_t)std::lround(kSeamSeconds * sampleRate);
         swapLen_ = (int64_t)std::lround(kSwapSeconds * sampleRate);
         holdLen_ = (int64_t)std::lround(kHoldSeconds * sampleRate);
         maxDrift_ = (float)(kMaxDriftSec * sampleRate);
-        if (srChanged || hist_.capacity() < maxLen_)
+        if (changed)
         {
-            // Last Complete Bar can reach back almost two bars (pressed just before a downbeat).
-            hist_.allocate(2 * maxLen_ + seam_ + kCopyMargin + (int64_t)(0.25 * sampleRate));
-            for (Loop& L : loops_) { L.l.assign((size_t)maxLen_, 0.0f); L.r.assign((size_t)maxLen_, 0.0f); L.valid = false; L.len = 0; }
+            hist_.allocate(maxLen_ + (int64_t)std::ceil(extraHistorySeconds * sampleRate) + seam_ + kCopyMargin);
+            for (Buffer& b : bufs_) { b.l.assign((size_t)maxLen_, 0.0f); b.r.assign((size_t)maxLen_, 0.0f); }
+            for (Bank& k : banks_) { k.valid = false; k.buf = k.oldBuf = -1; k.len = 0; }
             now_ = 0;
             validFrom_ = 0;
-            lastDB_ = prevDB_ = -1;
+            dbCount_ = 0;
         }
         clock_.prepare(sampleRate);
-        presence_.setTime((int)std::lround(kFadeSeconds * sampleRate));
-        dub_.setTime((int)std::lround(kDubSeconds * sampleRate));
+        for (Bank& k : banks_)
+        {
+            k.presence.setTime((int)std::lround(kFadeSeconds * sampleRate));
+            k.gain.setTime((int)std::lround(kGainSeconds * sampleRate));
+            k.dub.setTime((int)std::lround(kDubSeconds * sampleRate));
+        }
         drift_.prepare(sampleRate);
         prepared_ = true;
         reset();
@@ -106,81 +131,110 @@ public:
     void reset()
     {
         clock_.reset();
-        for (int c = 0; c < 2; ++c) { fbLp_[c].reset(); outLp_[c].reset(); }
         drift_.reset();
-        arm_ = Arm::None;
-        copyPending_ = false;
-        clearing_ = false;
-        swapRemain_ = 0;
-        if (loops_[1 - active_].valid && loops_[active_].valid) loops_[1 - active_].valid = false;
-        presence_.snap(loops_[active_].valid ? 1.0f : 0.0f);
-        dub_.snap(0.0f);
-        holdRemain_ = 0;
-        captureReq_.store(false);
-        clearReq_.store(false);
+        copyBank_ = -1;
+        for (Bank& k : banks_)
+        {
+            for (int c = 0; c < 2; ++c) { k.fbLp[c].reset(); k.outLp[c].reset(); }
+            k.arm = Arm::None;
+            k.copyPending = false;
+            k.copyBuf = -1;
+            if (k.clearing) { k.valid = false; k.buf = -1; k.clearing = false; }
+            k.oldBuf = -1;
+            k.swapRemain = 0;
+            k.presence.snap(k.valid ? 1.0f : 0.0f);
+            k.dub.snap(0.0f);
+            k.holdRemain = 0;
+            k.captureReq.store(false);
+            k.clearReq.store(false);
+            k.firstBlock = true;
+        }
         mixFirst_ = true;
     }
 
-    void requestCapture() { captureReq_.store(true, std::memory_order_release); }
-    void requestClear()   { clearReq_.store(true, std::memory_order_release); }
+    void requestCapture(int bank) { if (bank >= 0 && bank < kNumBanks) banks_[bank].captureReq.store(true, std::memory_order_release); }
+    void requestClear(int bank)   { if (bank >= 0 && bank < kNumBanks) banks_[bank].clearReq.store(true, std::memory_order_release); }
 
-    Status status() const { return status_; }
-    bool   hasLoop() const { return loops_[active_].valid && !clearing_; }
-    int64_t loopLength() const { return loops_[active_].valid ? loops_[active_].len : 0; }
-    int64_t maxLoopLength() const { return maxLen_; }
-    int64_t samplePosition() const { return now_; }
-
-    // Read-only view of the active loop (tests, future waveform display).
-    const float* loopLeft() const  { return loops_[active_].l.data(); }
-    const float* loopRight() const { return loops_[active_].r.data(); }
+    Status  status(int bank) const      { return banks_[bank].status; }
+    bool    hasLoop(int bank) const     { return banks_[bank].valid && !banks_[bank].clearing; }
+    int64_t loopLength(int bank) const  { return banks_[bank].valid ? banks_[bank].len : 0; }
+    int     loopBars(int bank) const    { return banks_[bank].valid ? banks_[bank].bars : 0; }
+    // Playback position 0..1 within the loop (0 when empty).
+    float   progress(int bank) const
+    {
+        const Bank& k = banks_[bank];
+        return (k.valid && k.len > 0) ? (float)((double)k.idx / (double)k.len) : 0.0f;
+    }
+    int64_t maxLoopLength() const   { return maxLen_; }
+    int64_t samplePosition() const  { return now_; }
+    const float* loopLeft(int bank) const  { const Bank& k = banks_[bank]; return k.buf >= 0 ? bufs_[k.buf].l.data() : nullptr; }
+    const float* loopRight(int bank) const { const Bank& k = banks_[bank]; return k.buf >= 0 ? bufs_[k.buf].r.data() : nullptr; }
 
     // ---- audio ---------------------------------------------------------------
     // In-place safe: each frame's input is read before that frame's output is written.
     void process(const float* inL, const float* inR, float* outL, float* outR, int numFrames,
-                 const TransportInfo& transport, const Params& p)
+                 const TransportInfo& transport, const GlobalParams& g, const BankParams bp[kNumBanks])
     {
         if (!prepared_ || numFrames <= 0) return;
         if (inR == nullptr) inR = inL;
 
         const ClockBlock cb = clock_.advance(transport, numFrames);
         barLen_ = cb.barLen;
-        const int64_t barLenI = (int64_t)std::llround(cb.barLen);
-        mode_ = p.captureMode;
+        mode_ = g.captureMode;
 
         if (cb.discontinuity)
         {
-            lastDB_ = prevDB_ = -1;
-            if (arm_ == Arm::Recording) arm_ = Arm::Waiting;
-            const int64_t ph = (int64_t)std::llround(cb.phase0);
-            for (Loop& L : loops_)
-                if (L.valid) L.idx = wrap(ph + L.offset, L.len);
+            dbCount_ = 0;
+            for (Bank& k : banks_)
+            {
+                if (k.arm == Arm::Recording) k.arm = Arm::Waiting;
+                if (k.valid) resyncBank(k, cb.phase0);
+            }
         }
 
-        if (clearReq_.exchange(false, std::memory_order_acq_rel)) doClear();
-        if (captureReq_.exchange(false, std::memory_order_acq_rel)) doCapture(p.captureMode, barLenI);
+        for (int b = 0; b < kNumBanks; ++b)
+        {
+            Bank& k = banks_[b];
+            k.bars = (k.valid ? k.bars : 0);
+            k.nextBars = clampBars(bp[b].lengthBars);
+            if (k.clearReq.exchange(false, std::memory_order_acq_rel)) doClear(b);
+            if (k.captureReq.exchange(false, std::memory_order_acq_rel)) doCapture(b, g.captureMode);
+        }
         serviceCopy(cb.phase0);
 
         // ---- per-block control values ----
-        const double toneHz = 400.0 * std::pow(18000.0 / 400.0, (double)clampv(p.tone, 0.0f, 1.0f));
-        for (int c = 0; c < 2; ++c)
-        {
-            if (p.tone >= 0.999f) { fbLp_[c].coef = 1.0f; outLp_[c].coef = 1.0f; }
-            else { fbLp_[c].setCutoff(toneHz, sr_); outLp_[c].setCutoff(toneHz, sr_); }
-        }
-        const float mixA = (float)(clampv(p.mix, 0.0f, 1.0f) * kPi * 0.5);
-        const float dryT = p.mix >= 1.0f ? 0.0f : std::cos(mixA);
-        const float wetT = p.mix <= 0.0f ? 0.0f : std::sin(mixA);
-        const float fbT = clampv(p.feedback, 0.0f, 1.0f);
-        const float drT = clampv(p.drift, 0.0f, 1.0f) * maxDrift_;
-        if (mixFirst_) { dryMix_ = dryT; wetMix_ = wetT; fb_ = fbT; driftDepth_ = drT; mixFirst_ = false; }
+        const double toneHz = 400.0 * std::pow(18000.0 / 400.0, (double)clampv(g.tone, 0.0f, 1.0f));
+        const float mixA = (float)(clampv(g.mix, 0.0f, 1.0f) * kPi * 0.5);
+        const float dryT = g.mix >= 1.0f ? 0.0f : std::cos(mixA);
+        const float wetT = g.mix <= 0.0f ? 0.0f : std::sin(mixA);
+        const float drT = clampv(g.drift, 0.0f, 1.0f) * maxDrift_;
+        if (mixFirst_) { dryMix_ = dryT; wetMix_ = wetT; driftDepth_ = drT; mixFirst_ = false; }
         const float inv = 1.0f / (float)numFrames;
-        const float dDry = (dryT - dryMix_) * inv, dWet = (wetT - wetMix_) * inv;
-        const float dFb = (fbT - fb_) * inv, dDr = (drT - driftDepth_) * inv;
+        const float dDry = (dryT - dryMix_) * inv, dWet = (wetT - wetMix_) * inv, dDr = (drT - driftDepth_) * inv;
 
-        const bool wantDub = !clearing_ &&
-            (p.playbackMode == PlaybackMode::ContinuousOverdub ||
-             (p.playbackMode == PlaybackMode::OverdubOnDemand && p.overdub));
-        dub_.setTarget(wantDub ? 1.0f : 0.0f);
+        bool anySolo = false;
+        for (int b = 0; b < kNumBanks; ++b) anySolo = anySolo || bp[b].solo;
+        for (int b = 0; b < kNumBanks; ++b)
+        {
+            Bank& k = banks_[b];
+            for (int c = 0; c < 2; ++c)
+            {
+                if (g.tone >= 0.999f) { k.fbLp[c].coef = 1.0f; k.outLp[c].coef = 1.0f; }
+                else { k.fbLp[c].setCutoff(toneHz, sr_); k.outLp[c].setCutoff(toneHz, sr_); }
+            }
+            const float fbT = clampv(bp[b].feedback, 0.0f, 1.0f);
+            if (k.firstBlock) { k.fb = fbT; }
+            k.dFb = (fbT - k.fb) * inv;
+            const bool audible = !bp[b].mute && (!anySolo || bp[b].solo);
+            const float v = clampv(bp[b].volume, 0.0f, 1.0f);
+            const float gainT = audible ? v * v : 0.0f;
+            if (k.firstBlock) k.gain.snap(gainT); else k.gain.setTarget(gainT);
+            k.firstBlock = false;
+            k.wantDub = k.valid && !k.clearing &&
+                (g.playbackMode == PlaybackMode::ContinuousOverdub ||
+                 (g.playbackMode == PlaybackMode::OverdubOnDemand && bp[b].overdub));
+            k.dub.setTarget(k.wantDub ? 1.0f : 0.0f);
+        }
         drift_.renormalise();
 
         int dbi = 0;
@@ -191,87 +245,123 @@ public:
             const float xl = inL[i], xr = inR[i];   // read input before any output write
             hist_.write(now_, xl, xr);
 
-            dryMix_ += dDry; wetMix_ += dWet; fb_ += dFb; driftDepth_ += dDr;
-            const float pres = presence_.next();
-            const float dub = dub_.next();
+            dryMix_ += dDry; wetMix_ += dWet; driftDepth_ += dDr;
             const float d = driftDepth_ * drift_.next();
 
-            float ll = 0.0f, lr = 0.0f;
-            Loop& A = loops_[active_];
-            if (A.valid)
+            float wl = 0.0f, wr = 0.0f, presMax = 0.0f;
+            for (Bank& k : banks_)
             {
-                readLoop(A, d, ll, lr);
-                if (swapRemain_ > 0)
+                const float pres = k.presence.next();
+                const float gain = k.gain.next();
+                const float dub = k.dub.next();
+                k.fb += k.dFb;
+                if (!k.valid) continue;
+                if (pres > presMax) presMax = pres;
+
+                Buffer& B = bufs_[k.buf];
+                float ll = 0.0f, lr = 0.0f;
+                readLoop(B, k.len, k.idx, d, ll, lr);
+                if (k.swapRemain > 0)
                 {
-                    Loop& O = loops_[fadeFrom_];
                     float ol = 0.0f, orr = 0.0f;
-                    readLoop(O, d, ol, orr);
-                    const float x = 1.0f - (float)swapRemain_ / (float)swapLen_;
+                    readLoop(bufs_[k.oldBuf], k.oldLen, k.oldIdx, d, ol, orr);
+                    const float x = 1.0f - (float)k.swapRemain / (float)swapLen_;
                     ll = ll * x + ol * (1.0f - x);
                     lr = lr * x + orr * (1.0f - x);
-                    O.idx = O.idx + 1 >= O.len ? 0 : O.idx + 1;
-                    if (--swapRemain_ == 0) O.valid = false;
+                    k.oldIdx = k.oldIdx + 1 >= k.oldLen ? 0 : k.oldIdx + 1;
+                    if (--k.swapRemain == 0) k.oldBuf = -1;   // old buffer returns to the pool
                 }
-                ll = outLp_[0].process(ll);
-                lr = outLp_[1].process(lr);
+                ll = k.outLp[0].process(ll);
+                lr = k.outLp[1].process(lr);
 
                 if (dub > 0.0f)
                 {
-                    float& sl = A.l[(size_t)A.idx];
-                    float& sr = A.r[(size_t)A.idx];
-                    const float nl = softClip(fbLp_[0].process(sl) * fb_ + xl);
-                    const float nr = softClip(fbLp_[1].process(sr) * fb_ + xr);
+                    float& sl = B.l[(size_t)k.idx];
+                    float& sr = B.r[(size_t)k.idx];
+                    const float nl = softClip(k.fbLp[0].process(sl) * k.fb + xl);
+                    const float nr = softClip(k.fbLp[1].process(sr) * k.fb + xr);
                     sl += dub * (nl - sl);
                     sr += dub * (nr - sr);
                 }
-                A.idx = A.idx + 1 >= A.len ? 0 : A.idx + 1;
+                k.idx = k.idx + 1 >= k.len ? 0 : k.idx + 1;
+
+                const float gp = gain * pres;
+                wl += ll * gp;
+                wr += lr * gp;
             }
 
-            const float dryG = 1.0f - pres * (1.0f - dryMix_);
-            const float wetG = pres * wetMix_;
-            outL[i] = xl * dryG + ll * wetG;
-            outR[i] = xr * dryG + lr * wetG;
+            const float dryG = 1.0f - presMax * (1.0f - dryMix_);
+            outL[i] = xl * dryG + wl * wetMix_;
+            outR[i] = xr * dryG + wr * wetMix_;
 
             ++now_;
-            if (arm_ == Arm::Recording && now_ >= recStart_ + recLen_)
-            {
-                arm_ = Arm::None;
-                queueCopy(recStart_, recLen_);
-            }
+            for (Bank& k : banks_)
+                if (k.arm == Arm::Recording && now_ >= k.recStart + k.recLen)
+                {
+                    k.arm = Arm::None;
+                    queueCopy(k, k.recStart, k.recLen, k.recBars);
+                }
         }
 
-        if (clearing_ && presence_.value <= 0.0f)
+        for (int b = 0; b < kNumBanks; ++b)
         {
-            loops_[0].valid = loops_[1].valid = false;
-            loops_[0].len = loops_[1].len = 0;
-            clearing_ = false;
-            swapRemain_ = 0;
+            Bank& k = banks_[b];
+            if (k.clearing && k.presence.value <= 0.0f)
+            {
+                k.valid = false; k.clearing = false;
+                k.buf = k.oldBuf = -1; k.swapRemain = 0; k.len = 0;
+            }
+            if (k.holdRemain > 0) k.holdRemain -= numFrames;
+            k.status = computeStatus(k);
         }
-
-        if (holdRemain_ > 0) holdRemain_ -= numFrames;
-        status_ = computeStatus(barLenI, wantDub);
     }
 
 private:
     enum class Arm { None, Waiting, Recording };
 
-    struct Loop
+    struct Buffer { std::vector<float> l, r; };
+
+    struct Bank
     {
-        std::vector<float> l, r;
-        int64_t len = 0, idx = 0, offset = 0;
-        bool valid = false;
+        // loop
+        int buf = -1;
+        int64_t len = 0, idx = 0;
+        double offsetBar = 0.0;   // playback offset within a bar, centred on 0
+        int bars = 0;             // length of the current loop in bars
+        bool valid = false, clearing = false;
+        // crossfade from a previous loop
+        int oldBuf = -1;
+        int64_t oldLen = 0, oldIdx = 0, swapRemain = 0;
+        // capture
+        Arm arm = Arm::None;
+        int nextBars = 1, recBars = 1;
+        int64_t recStart = 0, recLen = 0;
+        bool copyPending = false;
+        int copyBuf = -1, copyBars = 1;
+        int64_t copyStart = 0, copyLen = 0, copyDone = 0;
+        // status
+        Status status = Status::NoHistory, holdStatus = Status::NoHistory;
+        int64_t holdRemain = 0;
+        // control
+        std::atomic<bool> captureReq{false}, clearReq{false};
+        Ramp presence, gain, dub;
+        OnePole fbLp[2], outLp[2];
+        float fb = 0.7f, dFb = 0.0f;
+        bool wantDub = false, firstBlock = true;
     };
 
-    void readLoop(const Loop& L, float d, float& outLeft, float& outRight) const
+    static int clampBars(int n) { return n <= 1 ? 1 : (n <= 2 ? 2 : (n <= 4 ? 4 : 8)); }
+
+    void readLoop(const Buffer& B, int64_t len, int64_t idx, float d, float& outLeft, float& outRight) const
     {
-        if (d <= 0.0f) { outLeft = L.l[(size_t)L.idx]; outRight = L.r[(size_t)L.idx]; return; }
-        const float pos = (float)L.idx - d;
+        if (d <= 0.0f) { outLeft = B.l[(size_t)idx]; outRight = B.r[(size_t)idx]; return; }
+        const float pos = (float)idx - d;
         const float fl = std::floor(pos);
         const float frac = pos - fl;
-        const int64_t i0 = wrap((int64_t)fl, L.len);
-        const int64_t i1 = i0 + 1 >= L.len ? 0 : i0 + 1;
-        outLeft  = L.l[(size_t)i0] + frac * (L.l[(size_t)i1] - L.l[(size_t)i0]);
-        outRight = L.r[(size_t)i0] + frac * (L.r[(size_t)i1] - L.r[(size_t)i0]);
+        const int64_t i0 = wrap((int64_t)fl, len);
+        const int64_t i1 = i0 + 1 >= len ? 0 : i0 + 1;
+        outLeft  = B.l[(size_t)i0] + frac * (B.l[(size_t)i1] - B.l[(size_t)i0]);
+        outRight = B.r[(size_t)i0] + frac * (B.r[(size_t)i1] - B.r[(size_t)i0]);
     }
 
     int64_t oldestAvailable() const
@@ -280,128 +370,182 @@ private:
         return ringOldest > validFrom_ ? ringOldest : validFrom_;
     }
 
-    void refuse(Status s) { holdStatus_ = s; holdRemain_ = holdLen_; }
+    // Downbeat k back from the latest (0 = latest). Requires k < dbCount_.
+    int64_t downbeat(int back) const { return db_[(dbHead_ - 1 - back + kMaxDownbeats) % kMaxDownbeats]; }
+
+    bool tempoMatches(const Bank& k) const { return std::fabs((double)k.len - k.bars * barLen_) <= k.bars + 1.0; }
+
+    // Keep the loop's bar-within-loop, move to the host's bar phase (relocate / restart).
+    void resyncBank(Bank& k, double phase0)
+    {
+        if (!tempoMatches(k)) return;
+        const int bar = clampv((int)std::floor(((double)k.idx - k.offsetBar) / barLen_), 0, k.bars - 1);
+        k.idx = wrap((int64_t)std::llround(bar * barLen_ + phase0 + k.offsetBar), k.len);
+    }
+
+    void refuse(Bank& k, Status s) { k.holdStatus = s; k.holdRemain = holdLen_; }
 
     void onDownbeat(double barLen)
     {
-        if (lastDB_ >= 0 && (double)(now_ - lastDB_) < barLen * 0.5) return;   // duplicate
-        prevDB_ = lastDB_;
-        lastDB_ = now_;
-        if (arm_ == Arm::Waiting)
+        if (dbCount_ > 0 && (double)(now_ - downbeat(0)) < barLen * 0.5) return;   // duplicate
+        db_[dbHead_] = now_;
+        dbHead_ = (dbHead_ + 1) % kMaxDownbeats;
+        if (dbCount_ < kMaxDownbeats) ++dbCount_;
+        for (Bank& k : banks_)
         {
-            const int64_t len = (int64_t)std::llround(barLen);
-            if (len > maxLen_) { arm_ = Arm::None; refuse(Status::TooLong); }
-            else { arm_ = Arm::Recording; recStart_ = now_; recLen_ = len; }
+            if (k.arm == Arm::Waiting)
+            {
+                const int64_t len = (int64_t)std::llround(k.recBars * barLen);
+                if (len > maxLen_) { k.arm = Arm::None; refuse(k, Status::TooLong); }
+                else { k.arm = Arm::Recording; k.recStart = now_; k.recLen = len; }
+            }
+            // Snap to the nearest bar line of the loop so it never drifts from the host.
+            if (k.valid && tempoMatches(k))
+            {
+                const int bar = (int)wrap((int64_t)std::floor(((double)k.idx - k.offsetBar) / barLen + 0.5), k.bars);
+                k.idx = wrap((int64_t)std::llround(bar * barLen + k.offsetBar), k.len);
+            }
         }
-        Loop& A = loops_[active_];
-        if (A.valid && std::fabs((double)A.len - barLen) <= 1.0) A.idx = wrap(A.offset, A.len);
     }
 
-    void doClear()
+    void doClear(int b)
     {
-        arm_ = Arm::None;
-        copyPending_ = false;
-        holdRemain_ = 0;
-        if (loops_[active_].valid) { clearing_ = true; presence_.setTarget(0.0f); }
+        Bank& k = banks_[b];
+        k.arm = Arm::None;
+        k.holdRemain = 0;
+        if (k.copyPending) { k.copyPending = false; k.copyBuf = -1; if (copyBank_ == b) copyBank_ = -1; }
+        if (k.valid) { k.clearing = true; k.presence.setTarget(0.0f); }
     }
 
-    void doCapture(CaptureMode mode, int64_t barLenI)
+    void doCapture(int b, CaptureMode mode)
     {
-        if (arm_ != Arm::None) { arm_ = Arm::None; return; }   // second press cancels Next Bar
-        if (copyPending_) return;
+        Bank& k = banks_[b];
+        if (k.arm != Arm::None) { k.arm = Arm::None; return; }   // second press cancels Next Bar
+        if (k.copyPending) return;
+        const int n = k.nextBars;
+        const int64_t barsLen = (int64_t)std::llround(n * barLen_);
         int64_t start = 0, len = 0;
         switch (mode)
         {
             case CaptureMode::LastCompleteBar:
-                if (prevDB_ < 0 || lastDB_ < 0) { refuse(Status::NoHistory); return; }
-                start = prevDB_; len = lastDB_ - prevDB_;
+                if (dbCount_ < n + 1) { refuse(k, barsLen > maxLen_ ? Status::TooLong : Status::NoHistory); return; }
+                start = downbeat(n); len = downbeat(0) - start;
                 break;
             case CaptureMode::RollingBar:
-                len = barLenI; start = now_ - len;
+                len = barsLen; start = now_ - len;
                 break;
             case CaptureMode::NextBar:
-                if (barLenI > maxLen_) { refuse(Status::TooLong); return; }
-                holdRemain_ = 0;
-                arm_ = Arm::Waiting;
+                if (barsLen > maxLen_) { refuse(k, Status::TooLong); return; }
+                k.holdRemain = 0;
+                k.recBars = n;
+                k.arm = Arm::Waiting;
                 return;
         }
-        if (len > maxLen_) { refuse(Status::TooLong); return; }
-        if (len < 2 * seam_ || start - seam_ < oldestAvailable()) { refuse(Status::NoHistory); return; }
-        queueCopy(start, len);
+        if (len > maxLen_) { refuse(k, Status::TooLong); return; }
+        if (len < 4 * seam_ || start - seam_ < oldestAvailable()) { refuse(k, Status::NoHistory); return; }
+        queueCopy(k, start, len, n);
     }
 
-    void queueCopy(int64_t start, int64_t len)
+    void queueCopy(Bank& k, int64_t start, int64_t len, int bars)
     {
-        holdRemain_ = 0;
-        copyPending_ = true;
-        copyStart_ = start;
-        copyLen_ = len;
-        copyDone_ = 0;
+        k.holdRemain = 0;
+        k.copyPending = true;
+        k.copyStart = start;
+        k.copyLen = len;
+        k.copyDone = 0;
+        k.copyBars = bars;
+        k.copyBuf = -1;
     }
 
+    int freeBuffer() const
+    {
+        bool used[kNumBuffers] = {};
+        for (const Bank& k : banks_)
+        {
+            if (k.valid && k.buf >= 0) used[k.buf] = true;
+            if (k.oldBuf >= 0) used[k.oldBuf] = true;
+            if (k.copyBuf >= 0) used[k.copyBuf] = true;
+        }
+        for (int i = 0; i < kNumBuffers; ++i) if (!used[i]) return i;
+        return -1;
+    }
+
+    // One capture copies at a time, in chunks, into a free pooled buffer.
     void serviceCopy(double phase0)
     {
-        if (!copyPending_) return;
-        if (copyDone_ == 0)
+        if (copyBank_ < 0)
+            for (int b = 0; b < kNumBanks; ++b)
+                if (banks_[b].copyPending) { copyBank_ = b; break; }
+        if (copyBank_ < 0) return;
+        Bank& k = banks_[copyBank_];
+        if (!k.copyPending) { copyBank_ = -1; return; }
+        if (k.copyBuf < 0)
         {
-            if (swapRemain_ > 0) return;   // the other buffer is still fading out
-            copyTarget_ = loops_[active_].valid ? 1 - active_ : active_;
+            k.copyBuf = freeBuffer();
+            if (k.copyBuf < 0) return;   // wait for a crossfade to release a buffer
         }
-        Loop& L = loops_[copyTarget_];
-        const int64_t n = (copyLen_ - copyDone_) < kCopyChunk ? (copyLen_ - copyDone_) : kCopyChunk;
-        for (int64_t k = 0; k < n; ++k)
-        {
-            const int64_t t = copyStart_ + copyDone_ + k;
-            L.l[(size_t)(copyDone_ + k)] = hist_.left(t);
-            L.r[(size_t)(copyDone_ + k)] = hist_.right(t);
-        }
-        copyDone_ += n;
-        if (copyDone_ < copyLen_) return;
+        Buffer& B = bufs_[k.copyBuf];
+        const int64_t n = (k.copyLen - k.copyDone) < kCopyChunk ? (k.copyLen - k.copyDone) : kCopyChunk;
+        hist_.copyOut(k.copyStart + k.copyDone, n, B.l.data() + k.copyDone, B.r.data() + k.copyDone);
+        k.copyDone += n;
+        if (k.copyDone < k.copyLen) return;
 
         // Seam: blend the loop's last `seam` samples into the audio that
         // preceded the window start, so end -> start is continuous.
-        const int64_t len = copyLen_;
+        const int64_t len = k.copyLen;
         const int64_t xf = seam_ < len / 4 ? seam_ : len / 4;
         for (int64_t i = 0; i < xf; ++i)
         {
             const double th = 0.5 * kPi * ((double)i + 0.5) / (double)xf;
-            const float a = (float)std::cos(th), b = (float)std::sin(th);
+            const float a = (float)std::cos(th), s = (float)std::sin(th);
             const int64_t j = len - xf + i;
-            const int64_t pre = copyStart_ - xf + i;
-            L.l[(size_t)j] = hist_.left(copyStart_ + j) * a + hist_.left(pre) * b;
-            L.r[(size_t)j] = hist_.right(copyStart_ + j) * a + hist_.right(pre) * b;
+            const int64_t pre = k.copyStart - xf + i;
+            B.l[(size_t)j] = hist_.left(k.copyStart + j) * a + hist_.left(pre) * s;
+            B.r[(size_t)j] = hist_.right(k.copyStart + j) * a + hist_.right(pre) * s;
         }
 
-        L.len = len;
-        L.valid = true;
-        L.idx = wrap(now_ - copyStart_, len);
-        L.offset = wrap(L.idx - (int64_t)std::llround(phase0), len);
-        if (copyTarget_ != active_ && loops_[active_].valid)
+        if (k.valid && !k.clearing)
         {
-            fadeFrom_ = active_;
-            swapRemain_ = swapLen_;
+            k.oldBuf = k.buf; k.oldLen = k.len; k.oldIdx = k.idx;
+            k.swapRemain = swapLen_;
         }
-        active_ = copyTarget_;
-        clearing_ = false;
-        presence_.setTarget(1.0f);
-        fbLp_[0].reset(); fbLp_[1].reset();
-        copyPending_ = false;
+        else if (k.valid)
+        {
+            k.presence.snap(0.0f);   // was fading out from a Clear: start the new loop from silence
+        }
+        k.buf = k.copyBuf;
+        k.copyBuf = -1;
+        k.len = len;
+        k.bars = k.copyBars;
+        k.idx = wrap(now_ - k.copyStart, len);
+        double off = std::fmod((double)k.idx - phase0, barLen_);
+        if (off < 0.0) off += barLen_;
+        if (off > 0.5 * barLen_) off -= barLen_;
+        k.offsetBar = off;
+        k.valid = true;
+        k.clearing = false;
+        k.presence.setTarget(1.0f);
+        k.fbLp[0].reset(); k.fbLp[1].reset();
+        k.copyPending = false;
+        copyBank_ = -1;
     }
 
-    Status computeStatus(int64_t barLenI, bool wantDub) const
+    Status computeStatus(const Bank& k) const
     {
-        if (holdRemain_ > 0) return holdStatus_;
-        if (arm_ == Arm::Waiting || copyPending_) return Status::Armed;
-        if (arm_ == Arm::Recording) return Status::Recording;
-        if (loops_[active_].valid && !clearing_) return wantDub ? Status::Overdubbing : Status::Playing;
-        if (barLenI > maxLen_) return Status::TooLong;
+        if (k.holdRemain > 0) return k.holdStatus;
+        if (k.arm == Arm::Waiting || k.copyPending) return Status::Armed;
+        if (k.arm == Arm::Recording) return Status::Recording;
+        if (k.valid && !k.clearing) return k.wantDub ? Status::Overdubbing : Status::Playing;
+        const int n = k.nextBars;
+        const int64_t len = (int64_t)std::llround(n * barLen_);
+        if (len > maxLen_) return Status::TooLong;
         switch (mode_)
         {
             case CaptureMode::LastCompleteBar:
-                return (prevDB_ >= 0 && lastDB_ - prevDB_ <= maxLen_ && prevDB_ - seam_ >= oldestAvailable())
-                           ? Status::Ready : Status::NoHistory;
+                return (dbCount_ >= n + 1 && downbeat(0) - downbeat(n) <= maxLen_ &&
+                        downbeat(n) - seam_ >= oldestAvailable()) ? Status::Ready : Status::NoHistory;
             case CaptureMode::RollingBar:
-                return (now_ - barLenI - seam_ >= oldestAvailable()) ? Status::Ready : Status::NoHistory;
+                return (now_ - len - seam_ >= oldestAvailable()) ? Status::Ready : Status::NoHistory;
             case CaptureMode::NextBar:
             default:
                 return Status::Ready;
@@ -409,7 +553,7 @@ private:
     }
 
     // configuration
-    double  sr_ = 0.0, maxBarSec_ = 0.0;
+    double  sr_ = 0.0, maxLoopSec_ = 0.0, extraHistSec_ = 0.0;
     int64_t maxLen_ = 0, seam_ = 0, swapLen_ = 0, holdLen_ = 0;
     float   maxDrift_ = 0.0f;
     bool    prepared_ = false;
@@ -418,33 +562,19 @@ private:
     BarClock   clock_;
     StereoRing hist_;
     int64_t now_ = 0, validFrom_ = 0;
-    int64_t lastDB_ = -1, prevDB_ = -1;
-    double  barLen_ = 0.0;
+    int64_t db_[kMaxDownbeats] = {};
+    int     dbHead_ = 0, dbCount_ = 0;
+    double  barLen_ = 88200.0;
     CaptureMode mode_ = CaptureMode::LastCompleteBar;
 
-    // loops
-    Loop loops_[2];
-    int  active_ = 0, fadeFrom_ = 1;
-    int64_t swapRemain_ = 0;
-    bool clearing_ = false;
+    // banks
+    Buffer bufs_[kNumBuffers];
+    Bank   banks_[kNumBanks];
+    int    copyBank_ = -1;
 
-    // capture
-    Arm arm_ = Arm::None;
-    int64_t recStart_ = 0, recLen_ = 0;
-    bool copyPending_ = false;
-    int  copyTarget_ = 0;
-    int64_t copyStart_ = 0, copyLen_ = 0, copyDone_ = 0;
-
-    // status
-    Status status_ = Status::NoHistory, holdStatus_ = Status::NoHistory;
-    int64_t holdRemain_ = 0;
-
-    // control
-    std::atomic<bool> captureReq_{false}, clearReq_{false};
-    Ramp presence_, dub_;
-    OnePole fbLp_[2], outLp_[2];
+    // shared control
     DriftSource drift_;
-    float dryMix_ = 1.0f, wetMix_ = 0.0f, fb_ = 0.7f, driftDepth_ = 0.0f;
+    float dryMix_ = 1.0f, wetMix_ = 0.0f, driftDepth_ = 0.0f;
     bool  mixFirst_ = true;
 };
 

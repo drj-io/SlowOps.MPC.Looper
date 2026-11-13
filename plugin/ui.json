@@ -2,19 +2,57 @@
   "kit": "cyan",
   "pages": [
     {
-      "name": "LOOP",
+      "name": "LOOPS",
       "controls": [
-        { "param": "Feedback", "widget": "knob" },
-        { "param": "Tone", "widget": "knob" },
-        { "param": "Drift", "widget": "knob" },
+        { "param": "Bank 1", "widget": "knob" },
+        { "param": "Bank 2", "widget": "knob" },
+        { "param": "Bank 3", "widget": "knob" },
         { "param": "Mix", "widget": "fader" },
-        { "param": "Capture", "widget": "switch" },
-        { "param": "Overdub", "widget": "switch" },
-        { "param": "Clear", "widget": "switch" },
-        { "param": "Status", "widget": "slider" },
+        { "param": "Status 1", "widget": "slider" },
+        { "param": "Status 2", "widget": "slider" },
+        { "param": "Status 3", "widget": "slider" },
         { "param": "Capture Mode", "widget": "switch" },
+        { "param": "Capture 1", "widget": "switch" },
+        { "param": "Capture 2", "widget": "switch" },
+        { "param": "Capture 3", "widget": "switch" },
         { "param": "Play Mode", "widget": "switch" },
+        { "param": "Overdub 1", "widget": "switch" },
+        { "param": "Overdub 2", "widget": "switch" },
+        { "param": "Overdub 3", "widget": "switch" },
+        "empty"
+      ]
+    },
+    {
+      "name": "MIX",
+      "controls": [
+        { "param": "Volume 1", "widget": "fader" },
+        { "param": "Volume 2", "widget": "fader" },
+        { "param": "Volume 3", "widget": "fader" },
+        { "param": "Tone", "widget": "knob" },
+        { "param": "Solo 1", "widget": "switch" },
+        { "param": "Solo 2", "widget": "switch" },
+        { "param": "Solo 3", "widget": "switch" },
+        { "param": "Drift", "widget": "knob" },
+        { "param": "Mute 1", "widget": "switch" },
+        { "param": "Mute 2", "widget": "switch" },
+        { "param": "Mute 3", "widget": "switch" },
         "empty",
+        { "param": "Clear 1", "widget": "switch" },
+        { "param": "Clear 2", "widget": "switch" },
+        { "param": "Clear 3", "widget": "switch" },
+        "empty"
+      ]
+    },
+    {
+      "name": "SOUND",
+      "controls": [
+        { "param": "Length 1", "widget": "switch" },
+        { "param": "Length 2", "widget": "switch" },
+        { "param": "Length 3", "widget": "switch" },
+        "empty",
+        { "param": "Feedback 1", "widget": "knob" },
+        { "param": "Feedback 2", "widget": "knob" },
+        { "param": "Feedback 3", "widget": "knob" },
         "empty"
       ]
     }

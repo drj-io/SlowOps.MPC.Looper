@@ -28,7 +28,8 @@ struct Sim
     double ppq = 0.0;          // host song position (advances only while playing)
     int block = 128;
     bool inPlace = false;
-    Params p;
+    GlobalParams g;
+    BankParams bp[LooperEngine::kNumBanks];
     LooperEngine e;
     std::function<float(int64_t, int)> input = [](int64_t, int) { return 0.0f; };
     std::vector<float> inL, inR, outL, outR;   // whole-run recordings
@@ -37,7 +38,7 @@ struct Sim
 
     explicit Sim(int blk = 128, bool inplace = false) : block(blk), inPlace(inplace)
     {
-        p.drift = 0.0f; p.mix = 1.0f; p.tone = 1.0f;
+        g.drift = 0.0f; g.mix = 1.0f; g.tone = 1.0f;
         e.prepare(sr, 512);
     }
     double barSamples() const { return num * 4.0 / den * 60.0 / bpm * sr; }
@@ -55,8 +56,8 @@ struct Sim
             const double barQ = num * 4.0 / den;
             ti.barStartPpq = std::floor(ppq / barQ + 1e-9) * barQ;
             for (int i = 0; i < n; ++i) { inL.push_back(bl[i]); inR.push_back(br[i]); }
-            if (inPlace) { e.process(bl.data(), br.data(), bl.data(), br.data(), n, ti, p); }
-            else { e.process(bl.data(), br.data(), ol.data(), orr.data(), n, ti, p); std::copy(ol.begin(), ol.begin() + n, bl.begin()); std::copy(orr.begin(), orr.begin() + n, br.begin()); }
+            if (inPlace) { e.process(bl.data(), br.data(), bl.data(), br.data(), n, ti, g, bp); }
+            else { e.process(bl.data(), br.data(), ol.data(), orr.data(), n, ti, g, bp); std::copy(ol.begin(), ol.begin() + n, bl.begin()); std::copy(orr.begin(), orr.begin() + n, br.begin()); }
             for (int i = 0; i < n; ++i) { outL.push_back(bl[i]); outR.push_back(br[i]); }
             if (playing) ppq += n / sr * bpm / 60.0;
             t += n;
@@ -67,8 +68,8 @@ struct Sim
     bool runUntilStatus(Status s, double maxSeconds = 1.0)
     {
         const int64_t limit = t + (int64_t)(maxSeconds * sr);
-        while (t < limit) { if (e.status() == s) return true; runUntil(t + block); }
-        return e.status() == s;
+        while (t < limit) { if (e.status(0) == s) return true; runUntil(t + block); }
+        return e.status(0) == s;
     }
 };
 
@@ -95,7 +96,7 @@ static void testPassThroughBeforeCapture()
     std::printf("[pass-through before first capture, any Mix]\n");
     for (float mix : {0.0f, 0.5f, 1.0f})
     {
-        Sim s; s.p.mix = mix; s.p.drift = 0.3f;
+        Sim s; s.g.mix = mix; s.g.drift = 0.3f;
         s.input = [](int64_t t, int ch) { return (float)(0.4 * std::sin(0.01 * t + ch)); };
         s.runFor(3.0);
         double maxErr = 0.0;
@@ -111,16 +112,16 @@ static void testLastCompleteBar(double bpm, int num, int den)
     const double bar = s.barSamples();
     s.input = barCoded(bar);
     s.runUntil((int64_t)(0.5 * bar));
-    CHECK(s.e.status() == Status::NoHistory, "status before one full bar is %s, want No Hist", statusName(s.e.status()));
+    CHECK(s.e.status(0) == Status::NoHistory, "status before one full bar is %s, want No Hist", statusName(s.e.status(0)));
     s.runUntil((int64_t)(2.5 * bar));   // mid bar index 2
-    CHECK(s.e.status() == Status::Ready, "status mid bar 3 is %s, want Ready", statusName(s.e.status()));
-    s.e.requestCapture();
-    CHECK(s.runUntilStatus(Status::Playing), "capture never reached Playing (status %s)", statusName(s.e.status()));
-    const int64_t len = s.e.loopLength();
+    CHECK(s.e.status(0) == Status::Ready, "status mid bar 3 is %s, want Ready", statusName(s.e.status(0)));
+    s.e.requestCapture(0);
+    CHECK(s.runUntilStatus(Status::Playing), "capture never reached Playing (status %s)", statusName(s.e.status(0)));
+    const int64_t len = s.e.loopLength(0);
     CHECK(std::llabs(len - std::llround(bar)) <= 1, "loop length %lld, bar %.1f", (long long)len, bar);
     const int64_t seam = std::llround(LooperEngine::kSeamSeconds * s.sr);
     double maxErr = 0.0;
-    for (int64_t i = 0; i < len - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft()[i] - 0.2f));
+    for (int64_t i = 0; i < len - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft(0)[i] - 0.2f));
     CHECK(maxErr < 1e-6, "loop content is not bar 2 (DC 0.2): max err %g", maxErr);
 
     // Phase lock: output right channel (loop of a bar-phase ramp) should equal the live bar phase.
@@ -142,18 +143,18 @@ static void testRollingBar()
     s.input = [](int64_t t, int ch) { return (float)((t % 1000000) / 1000000.0) * (ch ? -1.0f : 1.0f); };
     const int64_t bar = std::llround(s.barSamples());
     s.runUntil((int64_t)(0.4 * s.sr));
-    s.p.captureMode = CaptureMode::RollingBar;
-    s.e.requestCapture();
+    s.g.captureMode = CaptureMode::RollingBar;
+    s.e.requestCapture(0);
     s.runUntil(s.t + s.block);
-    CHECK(s.e.status() == Status::NoHistory, "rolling capture with 0.4 s history: status %s, want No Hist", statusName(s.e.status()));
-    CHECK(!s.e.hasLoop(), "a loop was created without enough history");
+    CHECK(s.e.status(0) == Status::NoHistory, "rolling capture with 0.4 s history: status %s, want No Hist", statusName(s.e.status(0)));
+    CHECK(!s.e.hasLoop(0), "a loop was created without enough history");
     const int64_t T = 200000;
     s.runUntil(T);
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     CHECK(s.runUntilStatus(Status::Playing), "rolling capture never reached Playing");
     const int64_t seam = std::llround(LooperEngine::kSeamSeconds * s.sr);
     double maxErr = 0.0;
-    for (int64_t i = 0; i < bar - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft()[i] - s.inL[(size_t)(T - bar + i)]));
+    for (int64_t i = 0; i < bar - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft(0)[i] - s.inL[(size_t)(T - bar + i)]));
     CHECK(maxErr < 1e-6, "rolling loop != [T-bar, T): max err %g", maxErr);
     // Playback is the live input delayed by exactly one bar.
     s.runUntil(T + bar);
@@ -168,27 +169,27 @@ static void testNextBar()
     Sim s;
     const double bar = s.barSamples();
     s.input = barCoded(bar);
-    s.p.captureMode = CaptureMode::NextBar;
+    s.g.captureMode = CaptureMode::NextBar;
     s.runUntil((int64_t)(2.0 * bar + 10000));
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntil(s.t + s.block);
-    CHECK(s.e.status() == Status::Armed, "after press: %s, want Armed", statusName(s.e.status()));
+    CHECK(s.e.status(0) == Status::Armed, "after press: %s, want Armed", statusName(s.e.status(0)));
     s.runUntil((int64_t)(3.0 * bar) - 256);
-    CHECK(s.e.status() == Status::Armed, "just before downbeat: %s, want Armed", statusName(s.e.status()));
+    CHECK(s.e.status(0) == Status::Armed, "just before downbeat: %s, want Armed", statusName(s.e.status(0)));
     s.runUntil((int64_t)(3.0 * bar) + 1000);
-    CHECK(s.e.status() == Status::Recording, "after downbeat: %s, want Rec Bar", statusName(s.e.status()));
+    CHECK(s.e.status(0) == Status::Recording, "after downbeat: %s, want Rec Bar", statusName(s.e.status(0)));
     s.runUntil((int64_t)(4.0 * bar) - 256);
-    CHECK(s.e.status() == Status::Recording, "late in the bar: %s, want Rec Bar", statusName(s.e.status()));
+    CHECK(s.e.status(0) == Status::Recording, "late in the bar: %s, want Rec Bar", statusName(s.e.status(0)));
     CHECK(s.runUntilStatus(Status::Playing), "Next Bar never reached Playing");
     const int64_t seam = std::llround(LooperEngine::kSeamSeconds * s.sr);
     double maxErr = 0.0;
-    for (int64_t i = 0; i < s.e.loopLength() - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft()[i] - 0.4f));
+    for (int64_t i = 0; i < s.e.loopLength(0) - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft(0)[i] - 0.4f));
     CHECK(maxErr < 1e-6, "Next Bar loop is not bar 4 (DC 0.4): max err %g", maxErr);
 
     // A second press while armed cancels.
-    Sim c; c.p.captureMode = CaptureMode::NextBar;
-    c.runUntil(10000); c.e.requestCapture(); c.runUntil(c.t + 128); c.e.requestCapture(); c.runUntil(c.t + 128);
-    CHECK(c.e.status() == Status::Ready, "second press did not cancel Next Bar (status %s)", statusName(c.e.status()));
+    Sim c; c.g.captureMode = CaptureMode::NextBar;
+    c.runUntil(10000); c.e.requestCapture(0); c.runUntil(c.t + 128); c.e.requestCapture(0); c.runUntil(c.t + 128);
+    CHECK(c.e.status(0) == Status::Ready, "second press did not cancel Next Bar (status %s)", statusName(c.e.status(0)));
 }
 
 static void testNoHistoryHoldAndDry()
@@ -197,10 +198,10 @@ static void testNoHistoryHoldAndDry()
     Sim s;
     s.input = [](int64_t t, int ch) { return (float)(0.3 * std::sin(0.02 * t + ch)); };
     s.runFor(0.5);
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runFor(0.5);
-    CHECK(s.e.status() == Status::NoHistory, "status %s, want No Hist", statusName(s.e.status()));
-    CHECK(!s.e.hasLoop(), "loop created");
+    CHECK(s.e.status(0) == Status::NoHistory, "status %s, want No Hist", statusName(s.e.status(0)));
+    CHECK(!s.e.hasLoop(0), "loop created");
     double err = 0.0;
     for (size_t i = 0; i < s.outL.size(); ++i) err = std::fmax(err, std::fabs(s.outL[i] - s.inL[i]));
     CHECK(err == 0.0, "output not dry after refused capture (err %g)", err);
@@ -209,15 +210,15 @@ static void testNoHistoryHoldAndDry()
 static void testTooLong()
 {
     std::printf("[Too Long]\n");
-    Sim s; s.bpm = 30.0;   // 4/4 bar = 8 s > 6 s loop memory
+    Sim s; s.bpm = 30.0; s.bp[0].lengthBars = 8;   // 8 bars of 4/4 = 64 s > 32 s loop memory
     s.runFor(0.2);
-    CHECK(s.e.status() == Status::TooLong, "status %s, want Too Long", statusName(s.e.status()));
+    CHECK(s.e.status(0) == Status::TooLong, "status %s, want Too Long", statusName(s.e.status(0)));
 }
 
 // Captures a silent rolling bar, injects a burst during the first pass, then measures each pass.
 static std::vector<double> passPeaks(PlaybackMode mode, float fb, std::function<void(Sim&, int)> perPass = {})
 {
-    Sim s; s.p.playbackMode = mode; s.p.feedback = fb; s.p.captureMode = CaptureMode::RollingBar;
+    Sim s; s.g.playbackMode = mode; s.bp[0].feedback = fb; s.g.captureMode = CaptureMode::RollingBar;
     const int64_t bar = std::llround(s.barSamples());
     int64_t burstStart = -1;
     s.input = [&](int64_t t, int) {
@@ -225,9 +226,9 @@ static std::vector<double> passPeaks(PlaybackMode mode, float fb, std::function<
         return 0.0f;
     };
     s.runUntil(bar + 2000);
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntilStatus(Status::Playing);
-    if (mode == PlaybackMode::OverdubOnDemand) s.p.overdub = true;
+    if (mode == PlaybackMode::OverdubOnDemand) s.bp[0].overdub = true;
     burstStart = s.t + 1000;
     const int64_t p0 = burstStart - 500;   // pass boundaries are measured from here
     std::vector<double> peaks;
@@ -264,7 +265,7 @@ static void testFeedbackDecay()
     CHECK(fr[1] < 1e-6 && fr[5] < 1e-6, "Freeze recorded the burst (%g)", fr[5]);
 
     // On Demand: Overdub on for the burst pass only, then off -> layer is kept unchanged.
-    auto od = passPeaks(PlaybackMode::OverdubOnDemand, 0.5f, [](Sim& s, int k) { if (k == 1) s.p.overdub = false; });
+    auto od = passPeaks(PlaybackMode::OverdubOnDemand, 0.5f, [](Sim& s, int k) { if (k == 1) s.bp[0].overdub = false; });
     std::printf("  On Demand (overdub only first pass) peaks: %.4f %.4f %.4f %.4f\n", od[1], od[2], od[3], od[4]);
     CHECK(od[1] > 0.2 && std::fabs(od[4] - od[1]) < 1e-3, "On Demand did not hold the layer once Overdub was off");
 }
@@ -272,11 +273,11 @@ static void testFeedbackDecay()
 static void testSeams()
 {
     std::printf("[Loop seam crossfade]\n");
-    Sim s; s.p.captureMode = CaptureMode::RollingBar;
+    Sim s; s.g.captureMode = CaptureMode::RollingBar;
     const double f = 233.0, amp = 0.5;
     s.input = [&](int64_t t, int) { return (float)(amp * std::sin(2.0 * kPi * f * t / s.sr)); };
     s.runFor(2.6);
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntilStatus(Status::Playing);
     const int64_t from = s.t + 2000;
     s.runFor(4.5);
@@ -289,12 +290,12 @@ static void testSeams()
 
 static std::vector<float> scenario(int block, bool inPlace)
 {
-    Sim s(block, inPlace); s.p.drift = 0.25f; s.p.tone = 0.6f; s.p.mix = 0.6f; s.p.playbackMode = PlaybackMode::Freeze;
+    Sim s(block, inPlace); s.g.drift = 0.25f; s.g.tone = 0.6f; s.g.mix = 0.6f; s.g.playbackMode = PlaybackMode::Freeze;
     s.input = [](int64_t t, int ch) { return (float)(0.3 * std::sin(0.013 * t + ch) * (1.0 + 0.5 * std::sin(0.0001 * t))); };
     s.runUntil(3 * 88200 + 1000);
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntil(4 * 88200 + 512 * 3);   // block-aligned for every size tested
-    s.p.playbackMode = PlaybackMode::ContinuousOverdub;   // overdub from a fixed time
+    s.g.playbackMode = PlaybackMode::ContinuousOverdub;   // overdub from a fixed time
     s.runUntil(6 * 88200);
     std::vector<float> o(s.outL.begin() + 3 * 88200 + 1000 + 8820, s.outL.end());
     o.insert(o.end(), s.outR.begin() + 3 * 88200 + 1000 + 8820, s.outR.end());
@@ -326,14 +327,14 @@ static void testTransportResync()
     const double bar = s.barSamples();
     s.input = barCoded(bar);
     s.runUntil((int64_t)(2.5 * bar));
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntilStatus(Status::Playing);
     // Stop: the loop keeps playing on the internal clock.
     s.runUntil((int64_t)(3.5 * bar));
     s.playing = false;
     const int64_t stopAt = s.t;
     s.runUntil(stopAt + (int64_t)bar);
-    CHECK(s.e.status() == Status::Playing, "loop stopped with the transport (status %s)", statusName(s.e.status()));
+    CHECK(s.e.status(0) == Status::Playing, "loop stopped with the transport (status %s)", statusName(s.e.status(0)));
     double rms = 0.0;
     for (int64_t t = stopAt; t < s.t; ++t) rms += s.outL[(size_t)t] * s.outL[(size_t)t];
     CHECK(rms > 0.0, "silent while stopped");
@@ -360,15 +361,15 @@ static void testTransportResync()
 static void testClear()
 {
     std::printf("[Clear]\n");
-    Sim s; s.p.mix = 0.5f;
+    Sim s; s.g.mix = 0.5f;
     s.input = [](int64_t t, int ch) { return (float)(0.3 * std::sin(0.02 * t + ch)); };
     s.runUntil(3 * 88200);
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntilStatus(Status::Playing);
     s.runFor(0.5);
-    s.e.requestClear();
+    s.e.requestClear(0);
     s.runFor(0.1);
-    CHECK(!s.e.hasLoop() && s.e.status() == Status::Ready, "after Clear: status %s", statusName(s.e.status()));
+    CHECK(!s.e.hasLoop(0) && s.e.status(0) == Status::Ready, "after Clear: status %s", statusName(s.e.status(0)));
     const int64_t from = s.t;
     s.runFor(0.5);
     double err = 0.0;
@@ -383,17 +384,19 @@ static void testRecapture()
     const double bar = s.barSamples();
     s.input = barCoded(bar);
     s.runUntil((int64_t)(2.5 * bar));
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntilStatus(Status::Playing);
     s.runUntil((int64_t)(4.5 * bar));
-    s.e.requestCapture();
+    s.e.requestCapture(0);
     s.runUntilStatus(Status::Playing);
     s.runFor(0.1);
     const int64_t seam = std::llround(LooperEngine::kSeamSeconds * s.sr);
     double maxErr = 0.0;
-    for (int64_t i = 0; i < s.e.loopLength() - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft()[i] - 0.4f));
+    for (int64_t i = 0; i < s.e.loopLength(0) - seam; ++i) maxErr = std::fmax(maxErr, std::fabs(s.e.loopLeft(0)[i] - 0.4f));
     CHECK(maxErr < 1e-6, "second capture is not bar 4: err %g", maxErr);
 }
+
+#include "core_tests_banks.inc"
 
 int main()
 {
@@ -410,6 +413,7 @@ int main()
     testTransportResync();
     testClear();
     testRecapture();
+    testBanks();
     std::printf("\ncore_tests: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

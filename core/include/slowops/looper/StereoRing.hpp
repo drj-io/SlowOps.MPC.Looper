@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace slowops::looper {
@@ -26,6 +27,19 @@ public:
     }
     float left(int64_t t) const  { return l_[(size_t)(t % cap_)]; }
     float right(int64_t t) const { return r_[(size_t)(t % cap_)]; }
+
+    // Copy frames [t, t + n) into dst (at most two contiguous segments).
+    void copyOut(int64_t t, int64_t n, float* dstL, float* dstR) const
+    {
+        while (n > 0)
+        {
+            const int64_t i = t % cap_;
+            const int64_t seg = (cap_ - i) < n ? (cap_ - i) : n;
+            std::memcpy(dstL, l_.data() + i, sizeof(float) * (size_t)seg);
+            std::memcpy(dstR, r_.data() + i, sizeof(float) * (size_t)seg);
+            dstL += seg; dstR += seg; t += seg; n -= seg;
+        }
+    }
 
 private:
     int64_t cap_ = 1;
