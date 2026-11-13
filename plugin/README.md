@@ -1,4 +1,4 @@
-# Slow Ops Looper 1.0
+# Looper 1.1 (by Slow Ops)
 
 A three-bank stereo looper for Akai MPC standalone. It sits as an insert effect on a track and captures
 1, 2, 4 or 8 bars of what that track is playing, in time with the MPC. You can overdub onto each loop,
@@ -10,14 +10,24 @@ Made by Slow Ops. Free, MIT licence. Third-party plugin: Akai does not support i
 
 You need MPC OS 3.10.1 or later.
 
-1. Unzip. Copy the folder `Slow Ops - VST - Slow Ops Looper` into a folder named `VST2 Plugins` at the top
+1. Unzip. Copy the folder `Slow Ops - VST - Looper` into a folder named `VST2 Plugins` at the top
    level of a USB drive, an SD card or the MPC's internal drive. Create `VST2 Plugins` if it isn't there.
 2. On the MPC, open **Preferences → Enhancements (Beta)** and switch on **Enable Enhancements** and
    **External Plugin Support**.
-3. Add **Slow Ops Looper** (under External Plugins) as an insert on the track you want to loop. Restart the MPC
+3. Add **Looper** by Slow Ops (under External Plugins) as an insert on the track you want to loop. Restart the MPC
    if it doesn't appear.
 
 `INSTALL.txt` has the same steps in more detail.
+
+## Upgrading from 1.0
+
+In 1.0 the plugin was called "Slow Ops Looper", which the MPC cut down to "Slow .ooper". It is now called
+**Looper** (by Slow Ops).
+
+1. Delete the old `Slow Ops - VST - Slow Ops Looper` folder from `VST2 Plugins`, then copy in the new folder.
+2. Restart the MPC, or refresh its plugin list, so it picks up the new name.
+3. If a saved project shows the plugin as missing, add **Looper** to that insert slot again. Its settings go
+   back to the defaults.
 
 ## Quick start
 
@@ -33,9 +43,12 @@ You need MPC OS 3.10.1 or later.
 
 - The **beat boxes** along the top show the beat of the bar. Their colour shows what the looper is doing:
   cyan idle, amber waiting for the 1, red recording, green playing, purple overdubbing.
-- The **Bank dial** shows where the bank is in its loop (for example 3/4 means bar 3 of 4).
+- The **Bank dial** shows where the bank is in its loop (for example 3/4 means bar 3 of 4). While a capture
+  records, the dial shows how far the recording has got instead.
 - **CAPTURE n** records into the bank and shows its state: Ready, Waiting for 1, Recording, Playing, Overdub,
-  No History or Too Long. Capturing into a bank that already has a loop replaces it with a crossfade.
+  No History or Too Long. Capturing into a bank that already has a loop replaces it. With Next Bar, the old
+  loop keeps playing through the count-in, stops when recording starts, and the new loop takes over on its
+  first beat. With Last Bar or Rolling the swap is instant, with a short crossfade.
 - **OVERDUB n** layers new playing onto the loop while it is on (in the On Demand play mode).
 - **SOLO n / MUTE n** act on that bank only. The live track is never soloed or muted.
 - **PLAY/STOP n** starts and stops the bank without losing it. **CLEAR n** erases it.
@@ -46,14 +59,16 @@ You need MPC OS 3.10.1 or later.
 - **Play Mode** controls what happens to the loop as it plays. **Freeze** never changes the loop. **On Demand**
   overdubs while OVERDUB is on. **Continuous** overdubs all the time.
 - **PLAY/STOP ALL** is the master. It follows the MPC transport: Stop stops the looper and Play starts it.
-  Pressed with the transport stopped, it starts every loop from the top without starting the MPC.
+  Pressed with the transport stopped, it starts every loop from the top without starting the MPC. Stopping
+  it also stops the metronome and the beat count, and cancels a capture that is waiting or recording. The
+  metronome only clicks while the looper is playing.
   **CLEAR ALL** erases every bank.
 
 **MIX**
 
 - **Volume 1–3**.
 - **Play Timing** sets when PLAY/STOP taps take effect: **Immediate**, **Bar End** (the next bar line) or
-  **Loop End** (when that bank's loop comes back round). A waiting tap shows STARTING or STOPPING in amber.
+  **Loop End** (when that bank's loop comes back round; the default). A waiting tap shows STARTING or STOPPING in amber.
 - **Latency** makes loops play slightly early to make up for the MPC's audio delay. The default is 12 ms. If
   your loops sound late against the MPC's drums, turn it up; if they sound early, turn it down. It applies to
   loops already recorded, so you can adjust it while a loop plays.
@@ -61,7 +76,8 @@ You need MPC OS 3.10.1 or later.
   Turn Monitor off if the MPC already monitors your input and you hear it twice. The loops then play at full
   level and Mix has no effect.
 - **Auto Standby** (on by default): the metronome goes to Standby as soon as your first loop is captured, so
-  the click is only there while you lay down the first loop.
+  the click is only there while you lay down the first loop. Re-recording that first loop with Next Bar (no
+  other bank has a loop) switches it back On for the count-in and the recording, then to Standby again.
 - **Tone** darkens the loops, and the layers below get darker on each overdub. **Drift** adds slow tape wobble.
   **Mix** blends the live track with the loops. **Click Level** sets the metronome volume.
 

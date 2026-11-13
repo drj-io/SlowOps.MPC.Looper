@@ -27,7 +27,7 @@ git submodule update --init
 ```
 
 On the first run, `build.py` installs Zig into `third_party/mpc-plugin-builder-sdk/.sdk-tools/` (about 50 MB).
-The output folder is `plugin/build/Slow Ops - VST - Slow Ops Looper/`. Copy the whole folder into
+The output folder is `plugin/build/Slow Ops - VST - Looper/`. Copy the whole folder into
 `VST2 Plugins/` at the root of a drive the MPC can see.
 
 You edit the UI in `plugin/ui.json`, then run `./scripts/regen_skins.sh`, which regenerates `plugin/skins/`.

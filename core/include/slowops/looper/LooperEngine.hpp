@@ -69,6 +69,7 @@ struct Diagnostics
     bool    playing = false, ppqValid = false, hostLocked = false;
     bool    positionMoving = false;   // host song position advancing with the audio (flag or not)
     bool    hostRunning = false;      // the transport counts as playing (flag, or position advancing)
+    bool    running = true;           // the looper is counting (master on, or a bank still playing out)
     double  bpm = 0.0, ppqPos = 0.0, barLen = 0.0;
     int     timeSigNumerator = 4, timeSigDenominator = 4;
     int     beat = 0;                 // beat within the bar, 0-based
@@ -196,6 +197,7 @@ public:
             for (int c = 0; c < 2; ++c) { k.fbLp[c].reset(); k.outLp[c].reset(); }
             k.arm = Arm::None;
             k.copyPending = false;
+            k.fromRec = false;
             k.copyBuf = -1;
             if (k.clearing) { k.valid = false; k.buf = -1; k.clearing = false; }
             k.oldBuf = -1;
@@ -234,6 +236,22 @@ public:
     {
         const Bank& k = banks_[bank];
         return (k.valid && k.len > 0) ? (float)((double)k.idx / (double)k.len) : 0.0f;
+    }
+    // The bank's dial: while a capture records, how far it has got (bars = the capture's
+    // length); otherwise the loop's playback position. dialBars 0 = nothing to show.
+    int dialBars(int bank) const
+    {
+        const Bank& k = banks_[bank];
+        if (k.arm == Arm::Recording) return k.recBars;
+        if (k.copyPending && !k.valid) return k.copyBars;
+        return loopBars(bank);
+    }
+    float dialProgress(int bank) const
+    {
+        const Bank& k = banks_[bank];
+        if (k.arm == Arm::Recording && k.recLen > 0) return clampv((float)((double)(now_ - k.recStart) / (double)k.recLen), 0.0f, 0.999f);
+        if (k.copyPending && !k.valid) return 0.0f;
+        return progress(bank);
     }
     const Diagnostics& diagnostics() const { return diag_; }
     int64_t maxLoopLength() const   { return maxLen_; }
@@ -287,6 +305,16 @@ public:
         }
         if (masterForced_ >= 0 && (masterForced_ == 1) == g.playAll) masterForced_ = -1;
         const bool master = masterForced_ >= 0 ? masterForced_ == 1 : g.playAll;
+        // Master STOP also stops the count: a capture waiting for its "1" or recording is
+        // cancelled. The metronome and the beat count run while the master is on, or while a
+        // bank is still playing out to its Play Timing boundary.
+        if (masterWas_ && !master)
+            for (int b = 0; b < kNumBanks; ++b)
+                if (banks_[b].arm != Arm::None) { banks_[b].arm = Arm::None; refreshGate(banks_[b]); noteResult(b, CaptureResult::Cancelled); }
+        masterWas_ = master;
+        bool running = master;
+        for (const Bank& k : banks_) running = running || (k.valid && !k.clearing && k.on);
+        diag_.running = running;
         if (restartReq_)
         {
             // From the top: the internal clock starts bar 1 now (a discontinuity, so an armed
@@ -313,7 +341,7 @@ public:
         {
             const int num = clampv(transport.timeSigNumerator, 1, 32);
             const double phaseEnd = std::fmod(cb.phase0 + numFrames, cb.barLen);
-            diag_.beat = clampv((int)std::floor(phaseEnd / (cb.barLen / num)), 0, num - 1);
+            diag_.beat = running ? clampv((int)std::floor(phaseEnd / (cb.barLen / num)), 0, num - 1) : 0;
         }
 
         if (cb.discontinuity)
@@ -322,7 +350,7 @@ public:
             dbCount_ = 0;
             for (Bank& k : banks_)
             {
-                if (k.arm == Arm::Recording) k.arm = Arm::Waiting;
+                if (k.arm == Arm::Recording) { k.arm = Arm::Waiting; refreshGate(k); }   // the old loop plays again until the new 1
                 if (k.valid) resyncBank(k, cb.phase0);
             }
         }
@@ -371,7 +399,7 @@ public:
             k.wantOn = bp[b].play && master;
             if (k.on != k.wantOn && (timing_ == PlayTiming::Immediate || startNow || stopNow || !k.valid || k.clearing))
                 setOn(k, k.wantOn, startNow || !k.valid);
-            else if (startNow && k.on) k.gate.snap(1.0f);   // from the top: the downbeat is not faded in
+            else if (startNow && k.on && k.arm != Arm::Recording) k.gate.snap(1.0f);   // from the top: the downbeat is not faded in
             k.firstBlock = false;
             k.wantDub = k.valid && !k.clearing && k.on && k.wantOn &&
                 (g.playbackMode == PlaybackMode::ContinuousOverdub ||
@@ -384,7 +412,7 @@ public:
         // Runs whether or not the transport plays: stopped, it follows the free-running
         // internal clock at the host tempo, so you can hear it before pressing Play.
         int beatOffsets[64]; int beatIndex[64]; int numBeats = 0;
-        if (g.metronome)
+        if (g.metronome && running)
         {
             const int num = clampv(transport.timeSigNumerator, 1, 32);
             const double beatLen = cb.barLen / num;
@@ -426,6 +454,20 @@ public:
                 const float gain = k.gain.next();
                 const float dub = k.dub.next();
                 k.fb += k.dFb;
+                if (k.copyPending && k.fromRec)
+                {
+                    // A Next Bar recording just ended. Copying it into its buffer takes a few blocks,
+                    // so play its start straight from the history meanwhile (the same audio), at full
+                    // level from its first sample: the new loop's downbeat is never lost or faded in.
+                    // A loop it replaces stays silent (it stopped when recording began).
+                    if (pres > presMax) presMax = pres;
+                    const int64_t p = wrap(now_ - k.copyStart + (int64_t)std::lround(latency_), k.copyLen);
+                    const float ll = k.outLp[0].process(hist_.left(k.copyStart + p));
+                    const float lr = k.outLp[1].process(hist_.right(k.copyStart + p));
+                    wl += ll * gain * gate;
+                    wr += lr * gain * gate;
+                    continue;
+                }
                 if (!k.valid) continue;
                 if (pres > presMax) presMax = pres;
 
@@ -481,6 +523,9 @@ public:
                 {
                     k.arm = Arm::None;
                     queueCopy(k, k.recStart, k.recLen, k.recBars);
+                    k.fromRec = true;                       // plays from history until the copy is done
+                    if (k.on) k.gate.snap(1.0f);            // the new loop's first sample at full level
+                    k.presence.setTarget(1.0f);
                 }
         }
 
@@ -519,6 +564,7 @@ private:
         int nextBars = 1, recBars = 1;
         int64_t recStart = 0, recLen = 0;
         bool copyPending = false;
+        bool fromRec = false;   // the pending copy is a Next Bar recording that just ended: play it from history meanwhile
         int copyBuf = -1, copyBars = 1;
         int64_t copyStart = 0, copyLen = 0, copyDone = 0;
         // status
@@ -571,8 +617,11 @@ private:
     static void setOn(Bank& k, bool on, bool crisp)
     {
         k.on = on;
-        if (on && crisp) k.gate.snap(1.0f); else k.gate.setTarget(on ? 1.0f : 0.0f);
+        if (on && crisp && k.arm != Arm::Recording) k.gate.snap(1.0f); else refreshGate(k);
     }
+    // The gate is open when the bank plays, except while a Next Bar capture records into it:
+    // the loop being replaced plays through the count-in and stops when recording begins.
+    static void refreshGate(Bank& k) { k.gate.setTarget(k.on && k.arm != Arm::Recording ? 1.0f : 0.0f); }
 
     void refuse(Bank& k, Status s)
     {
@@ -597,7 +646,7 @@ private:
             {
                 const int64_t len = (int64_t)std::llround(k.recBars * barLen);
                 if (len > maxLen_) { k.arm = Arm::None; refuse(k, Status::TooLong); }
-                else { k.arm = Arm::Recording; k.recStart = now_; k.recLen = len; }
+                else { k.arm = Arm::Recording; k.recStart = now_; k.recLen = len; refreshGate(k); }   // a loop it replaces stops now
             }
             // Snap to the nearest bar line of the loop so it never drifts from the host.
             if (k.valid && tempoMatches(k))
@@ -612,15 +661,16 @@ private:
     {
         Bank& k = banks_[b];
         k.arm = Arm::None;
+        refreshGate(k);
         k.holdRemain = 0;
-        if (k.copyPending) { k.copyPending = false; k.copyBuf = -1; if (copyBank_ == b) copyBank_ = -1; }
+        if (k.copyPending) { k.copyPending = false; k.fromRec = false; k.copyBuf = -1; if (copyBank_ == b) copyBank_ = -1; }
         if (k.valid) { k.clearing = true; k.presence.setTarget(0.0f); }
     }
 
     void doCapture(int b, CaptureMode mode)
     {
         Bank& k = banks_[b];
-        if (k.arm != Arm::None) { k.arm = Arm::None; noteResult(b, CaptureResult::Cancelled); return; }   // second press cancels Next Bar
+        if (k.arm != Arm::None) { k.arm = Arm::None; refreshGate(k); noteResult(b, CaptureResult::Cancelled); return; }   // second press cancels Next Bar
         if (k.copyPending) { noteResult(b, CaptureResult::Busy); return; }
         const int n = k.nextBars;
         const int64_t barsLen = (int64_t)std::llround(n * barLen_);
@@ -652,6 +702,7 @@ private:
     {
         k.holdRemain = 0;
         k.copyPending = true;
+        k.fromRec = false;
         k.copyStart = start;
         k.copyLen = len;
         k.copyDone = 0;
@@ -706,7 +757,13 @@ private:
             B.r[(size_t)j] = hist_.right(k.copyStart + j) * a + hist_.right(pre) * s;
         }
 
-        if (k.valid && !k.clearing)
+        if (k.fromRec)
+        {
+            // Already playing from history (see the per-sample loop): hand over in place. The
+            // replaced loop went silent when recording began, so its buffer is simply released.
+            k.swapRemain = 0;
+        }
+        else if (k.valid && !k.clearing)
         {
             k.oldBuf = k.buf; k.oldLen = k.len; k.oldIdx = k.idx;
             k.swapRemain = swapLen_;
@@ -729,6 +786,7 @@ private:
         k.presence.setTarget(1.0f);
         k.fbLp[0].reset(); k.fbLp[1].reset();
         k.copyPending = false;
+        k.fromRec = false;
         copyBank_ = -1;
         ++diag_.loopsCompleted;
     }
@@ -736,6 +794,7 @@ private:
     Status computeStatus(const Bank& k) const
     {
         if (k.holdRemain > 0) return k.holdStatus;
+        if (k.copyPending && k.fromRec) return Status::Playing;   // the new loop already plays from history
         if (k.arm == Arm::Waiting || k.copyPending) return Status::Armed;
         if (k.arm == Arm::Recording) return Status::Recording;
         if (k.valid && !k.clearing) return k.wantDub ? Status::Overdubbing : Status::Playing;
@@ -793,6 +852,7 @@ private:
     float dryMix_ = 1.0f, wetMix_ = 0.0f, driftDepth_ = 0.0f, monMix_ = 1.0f;
     bool  restartReq_ = false, wasRunning_ = false;
     int   masterForced_ = -1;
+    bool  masterWas_ = true;
     PlayTiming timing_ = PlayTiming::Immediate;   // -1: follow playAll; 0/1: transport edge, until playAll matches
     float latency_ = 0.0f;   // samples the loop read runs ahead of idx (overdub still writes at idx)
     static constexpr float kLatencyGlide = 0.02f;
