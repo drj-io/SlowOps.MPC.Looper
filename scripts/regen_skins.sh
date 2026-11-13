@@ -15,7 +15,9 @@ p = 'plugin/skins/Q-Links.json'
 d = json.load(open(p))
 names = {x['name']: x['index'] for x in json.load(open('plugin/build/params.json'))['params']}
 # One-shot triggers and read-only displays never go on a knob.
-off = {i for n, i in names.items() if n.split(' ')[0] in ('Capture', 'Clear', 'Status', 'Bank')}
+params = json.load(open('plugin/build/params.json'))['params']
+off = {x['index'] for x in params if not x['automatable']} | \
+      {i for n, i in names.items() if n.split(' ')[0] in ('Capture', 'Clear')}
 for e in d['Screen Mode Q-Links']['map']:
     for k, v in e['Q-Links'].items():
         if v in off: e['Q-Links'][k] = -1
@@ -44,4 +46,50 @@ for tab in d['pageData']['tabs']:
             n += 1
 json.dump(d, open(t, 'w'), indent=2)
 print('patched', t, '(%d segment captions)' % n)
+
+# Beat counter: four boxes across the top of the LOOPS page, a radio group bound to
+# the read-only "Beat" parameter (the lit box is the current beat of the bar).
+import struct, zlib
+def png(path, w, h, fill, border):
+    rows = []
+    for y in range(h):
+        row = bytearray([0])
+        for x in range(w):
+            edge = x < 2 or y < 2 or x >= w - 2 or y >= h - 2
+            corner = (x < 4 or x >= w - 4) and (y < 4 or y >= h - 4) and not (2 <= x < w - 2 and 2 <= y < h - 2) and False
+            c = border if edge else fill
+            row += bytes(c)
+        rows.append(bytes(row))
+    raw = b''.join(rows)
+    def chunk(t, data): return struct.pack('>I', len(data)) + t + data + struct.pack('>I', zlib.crc32(t + data) & 0xffffffff)
+    with open(path, 'wb') as f:
+        f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 6, 0, 0, 0))
+                + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
+W, H, Y = 248, 30, 8
+png('plugin/skins/beat_on.png', W, H, (0x19, 0xc3, 0xe6, 255), (0x8f, 0xe9, 0xfa, 255))
+png('plugin/skins/beat_off.png', W, H, (0x2a, 0x2a, 0x2d, 255), (0x55, 0x55, 0x5a, 255))
+beat = names['Beat']
+handle = 'Parameter %d' % beat
+d = json.load(open(t))
+d['pageData']['replacementStrings'].append({'key': handle, 'value': ['1', '2', '3', '4']})
+tab = d['pageData']['tabs'][0]['componentDefinition']
+def bounds(b, show='Show'):
+    return {'version': 1, 'acceptsHWFocus': 'No', 'showWhenDataModelInvalid': show, 'whenVisible': 'Always',
+            'boundsType': 'Absolute', 'bounds': b}
+strip = []
+for k in range(4):
+    x = 38 + 320 * k
+    strip.append({'version': 2, 'componentData': {'version': 1, 'name': 'beat %d' % (k + 1), 'type': 'Button',
+                  'data': {'version': 2, 'onImage': 'beat_on.png', 'offImage': 'beat_off.png', 'buttonId': k,
+                           'numButtonsInGroup': 4, 'handleName': handle, 'gestureBehaviour': 'Instant'}},
+                  'handle remapping': {'version': 1, 'map': []}, 'bounds': bounds('%d %d %d %d' % (x, Y, W, H))})
+    strip.append({'version': 2, 'componentData': {'version': 1, 'name': 'beat caption %d' % (k + 1), 'type': 'Label',
+                  'data': {'version': 1, 'textStyle': {'version': 1, 'font': {'version': 1, 'name': 'Titillium Web', 'style': 'SemiBold', 'height': 22.0},
+                                                        'colour': 'ffffffff', 'justification': 'horizontallyCentred verticallyCentred', 'case': 'Original'},
+                           'type': 'Text', 'handleName': 'Data', 'text': str(k + 1)}},
+                  'handle remapping': {'version': 1, 'map': []}, 'bounds': bounds('%d %d %d %d' % (x, Y, W, H))})
+# Insert after the background (first entry) so the grid controls paint on top.
+tab['componentsData'][1:1] = strip
+json.dump(d, open(t, 'w'), indent=2)
+print('patched', t, '(beat strip bound to', handle + ')')
 PY

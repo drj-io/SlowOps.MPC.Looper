@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <random>
@@ -25,9 +26,10 @@ static int g_fail = 0, g_pass = 0;
 // Parameter indices (plugin/src/SlowOpsLooper.cpp). Bank params: B(bank, kX), bank 0 = the bare names.
 enum P { kMix = 0, kTone, kDrift, kCapMode, kPlayMode,
          kLength, kVolume, kFeedback, kSolo, kMute, kOverdub, kCapture, kClear, kProgress, kStatus };
-static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank;
+static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 7;
+enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel };
 static int B(int bank, int p) { return p + bank * kPerBank; }
-static bool isReadOnly(int i) { return i >= 5 && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9); }
+static bool isReadOnly(int i) { return i >= kBeat || (i >= 5 && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
 static float choice(int i, int n) { return (float)i / (float)(n - 1); }
 
 // ---- host side ----------------------------------------------------------------------
@@ -261,7 +263,7 @@ static void stateRecall()
         want.push_back({B(b, kCapture), 0.0f});
         want.push_back({B(b, kClear), 0.0f});
     }
-    CHECK((int)want.size() + 6 == kNum, "test does not cover every writable parameter");
+    CHECK((int)want.size() + 13 == kNum, "test does not cover every writable parameter");
     std::vector<uint8_t> chunk;
     std::vector<std::string> texts;
     {
@@ -368,6 +370,36 @@ static void banksScenario()
     for (int i = 0; i < kNum; ++i)
         if ((p.disp(effCanBeAutomated, i) != 0) == isReadOnly(i)) ++bad;
     CHECK(bad == 0, "%d parameters have the wrong automatable flag", bad);
+}
+
+static void beatAndDebug()
+{
+    std::printf("[Beat boxes and DEBUG readouts]\n");
+    Plug p; p.set(kMix, 1.0f);
+    p.input = [](int64_t t, int) { return (float)(0.3 * std::sin(0.02 * t)); };
+    // Beat: 120 BPM, a beat is 22050 samples. Sample the Beat text mid-beat for 8 beats.
+    std::string seq;
+    const int before = g_automateCount[kBeat];
+    for (int k = 0; k < 8; ++k) { p.runUntil(22050 * k + 11025); seq += p.text(kBeat); }
+    std::printf("  beats: %s, %d host updates\n", seq.c_str(), g_automateCount[kBeat] - before);
+    CHECK(seq == "12341234", "beat sequence %s, want 12341234", seq.c_str());
+    CHECK(g_automateCount[kBeat] - before >= 7, "Beat changes not sent to the host");
+    std::printf("  transport \"%s\", position \"%s\", bars \"%s\"\n", p.text(kDbgTransport).c_str(), p.text(kDbgPosition).c_str(), p.text(kDbgBars).c_str());
+    CHECK(p.text(kDbgTransport) == "Play 120.0 4/4", "transport text %s", p.text(kDbgTransport).c_str());
+    CHECK(p.text(kDbgBars) == "2 j1", "bars text %s", p.text(kDbgBars).c_str());
+    CHECK(p.text(kDbgLast) == "none" && p.text(kDbgLevel) == "silent", "before capture: %s / %s", p.text(kDbgLast).c_str(), p.text(kDbgLevel).c_str());
+    p.runUntil(5 * 88200 / 2);
+    p.set(kCapture, 1.0f);
+    p.runFor(0.3);
+    std::printf("  after Capture 1: taps \"%s\", last \"%s\", level \"%s\"\n", p.text(kDbgTaps).c_str(), p.text(kDbgLast).c_str(), p.text(kDbgLevel).c_str());
+    CHECK(p.text(kDbgTaps) == "1 0 0", "taps text %s", p.text(kDbgTaps).c_str());
+    CHECK(p.text(kDbgLast) == "B1 OK 2.0s", "last capture text %s", p.text(kDbgLast).c_str());
+    const int lvl = std::atoi(p.text(kDbgLevel).c_str());   // the 0.3 sine at Mix 100 %: about -10 dB, slow release
+    CHECK(lvl <= -9 && lvl >= -12, "loop level text %s", p.text(kDbgLevel).c_str());
+    // Stopped transport: the beat keeps counting on the internal clock.
+    p.playing = false;
+    p.runFor(0.6);
+    CHECK(p.text(kDbgTransport) == "Stop 120.0 4/4 int", "stopped transport text %s", p.text(kDbgTransport).c_str());
 }
 
 static void automationThreadTriggers()
@@ -517,6 +549,7 @@ int main(int argc, char** argv)
     stateRecall();
     automationThreadTriggers();
     banksScenario();
+    beatAndDebug();
     ichigoRender(outDir);
 
     std::printf("\nscenario_host: %d passed, %d failed\n", g_pass, g_fail);

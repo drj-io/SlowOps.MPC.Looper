@@ -55,6 +55,27 @@ enum class Status : int
     TooLong          // the bank's length is longer than the loop memory at this tempo
 };
 
+// Why the last capture request did what it did (diagnostics / on-screen debug).
+enum class CaptureResult : int { None = 0, Queued, Armed, Cancelled, NoHistory, TooLong, Busy };
+
+// Snapshot of what the engine saw, refreshed every block (audio thread only;
+// copy it out on the audio thread if another thread needs it).
+struct Diagnostics
+{
+    bool    playing = false, ppqValid = false, hostLocked = false;
+    double  bpm = 0.0, ppqPos = 0.0, barLen = 0.0;
+    int     timeSigNumerator = 4, timeSigDenominator = 4;
+    int     beat = 0;                 // beat within the bar, 0-based
+    int64_t barsElapsed = 0;          // downbeats seen since prepare
+    int64_t discontinuities = 0;      // transport jumps / starts
+    int64_t captureRequests[3] = {};  // per bank
+    int64_t clearRequests[3] = {};
+    int     lastBank = -1;
+    CaptureResult lastResult = CaptureResult::None;
+    int64_t lastLength = 0;           // samples of the last queued capture
+    float   loopPeak = 0.0f;          // peak of the summed banks (before Mix) in the last block
+};
+
 struct GlobalParams
 {
     float tone = 1.0f;    // 0..1  loop lowpass, 400 Hz .. 18 kHz (1 = flat)
@@ -165,6 +186,7 @@ public:
         const Bank& k = banks_[bank];
         return (k.valid && k.len > 0) ? (float)((double)k.idx / (double)k.len) : 0.0f;
     }
+    const Diagnostics& diagnostics() const { return diag_; }
     int64_t maxLoopLength() const   { return maxLen_; }
     int64_t samplePosition() const  { return now_; }
     const float* loopLeft(int bank) const  { const Bank& k = banks_[bank]; return k.buf >= 0 ? bufs_[k.buf].l.data() : nullptr; }
@@ -181,9 +203,23 @@ public:
         const ClockBlock cb = clock_.advance(transport, numFrames);
         barLen_ = cb.barLen;
         mode_ = g.captureMode;
+        diag_.playing = transport.playing;
+        diag_.ppqValid = transport.ppqValid;
+        diag_.hostLocked = cb.hostLocked;
+        diag_.bpm = transport.bpm;
+        diag_.ppqPos = transport.ppqPos;
+        diag_.barLen = cb.barLen;
+        diag_.timeSigNumerator = transport.timeSigNumerator;
+        diag_.timeSigDenominator = transport.timeSigDenominator;
+        {
+            const int num = clampv(transport.timeSigNumerator, 1, 32);
+            const double phaseEnd = std::fmod(cb.phase0 + numFrames, cb.barLen);
+            diag_.beat = clampv((int)std::floor(phaseEnd / (cb.barLen / num)), 0, num - 1);
+        }
 
         if (cb.discontinuity)
         {
+            ++diag_.discontinuities;
             dbCount_ = 0;
             for (Bank& k : banks_)
             {
@@ -197,8 +233,8 @@ public:
             Bank& k = banks_[b];
             k.bars = (k.valid ? k.bars : 0);
             k.nextBars = clampBars(bp[b].lengthBars);
-            if (k.clearReq.exchange(false, std::memory_order_acq_rel)) doClear(b);
-            if (k.captureReq.exchange(false, std::memory_order_acq_rel)) doCapture(b, g.captureMode);
+            if (k.clearReq.exchange(false, std::memory_order_acq_rel)) { ++diag_.clearRequests[b]; doClear(b); }
+            if (k.captureReq.exchange(false, std::memory_order_acq_rel)) { ++diag_.captureRequests[b]; doCapture(b, g.captureMode); }
         }
         serviceCopy(cb.phase0);
 
@@ -237,6 +273,7 @@ public:
         }
         drift_.renormalise();
 
+        float loopPeak = 0.0f;
         int dbi = 0;
         for (int i = 0; i < numFrames; ++i)
         {
@@ -290,6 +327,8 @@ public:
                 wr += lr * gp;
             }
 
+            const float aw = std::fabs(wl) > std::fabs(wr) ? std::fabs(wl) : std::fabs(wr);
+            if (aw > loopPeak) loopPeak = aw;
             const float dryG = 1.0f - presMax * (1.0f - dryMix_);
             outL[i] = xl * dryG + wl * wetMix_;
             outR[i] = xr * dryG + wr * wetMix_;
@@ -303,6 +342,7 @@ public:
                 }
         }
 
+        diag_.loopPeak = loopPeak;
         for (int b = 0; b < kNumBanks; ++b)
         {
             Bank& k = banks_[b];
@@ -383,11 +423,19 @@ private:
         k.idx = wrap((int64_t)std::llround(bar * barLen_ + phase0 + k.offsetBar), k.len);
     }
 
-    void refuse(Bank& k, Status s) { k.holdStatus = s; k.holdRemain = holdLen_; }
+    void refuse(Bank& k, Status s)
+    {
+        k.holdStatus = s; k.holdRemain = holdLen_;
+        diag_.lastBank = (int)(&k - banks_);
+        diag_.lastResult = s == Status::TooLong ? CaptureResult::TooLong : CaptureResult::NoHistory;
+        diag_.lastLength = 0;
+    }
+    void noteResult(int b, CaptureResult r, int64_t len = 0) { diag_.lastBank = b; diag_.lastResult = r; diag_.lastLength = len; }
 
     void onDownbeat(double barLen)
     {
         if (dbCount_ > 0 && (double)(now_ - downbeat(0)) < barLen * 0.5) return;   // duplicate
+        ++diag_.barsElapsed;
         db_[dbHead_] = now_;
         dbHead_ = (dbHead_ + 1) % kMaxDownbeats;
         if (dbCount_ < kMaxDownbeats) ++dbCount_;
@@ -420,8 +468,8 @@ private:
     void doCapture(int b, CaptureMode mode)
     {
         Bank& k = banks_[b];
-        if (k.arm != Arm::None) { k.arm = Arm::None; return; }   // second press cancels Next Bar
-        if (k.copyPending) return;
+        if (k.arm != Arm::None) { k.arm = Arm::None; noteResult(b, CaptureResult::Cancelled); return; }   // second press cancels Next Bar
+        if (k.copyPending) { noteResult(b, CaptureResult::Busy); return; }
         const int n = k.nextBars;
         const int64_t barsLen = (int64_t)std::llround(n * barLen_);
         int64_t start = 0, len = 0;
@@ -439,11 +487,13 @@ private:
                 k.holdRemain = 0;
                 k.recBars = n;
                 k.arm = Arm::Waiting;
+                noteResult(b, CaptureResult::Armed, barsLen);
                 return;
         }
         if (len > maxLen_) { refuse(k, Status::TooLong); return; }
         if (len < 4 * seam_ || start - seam_ < oldestAvailable()) { refuse(k, Status::NoHistory); return; }
         queueCopy(k, start, len, n);
+        noteResult(b, CaptureResult::Queued, len);
     }
 
     void queueCopy(Bank& k, int64_t start, int64_t len, int bars)
@@ -571,6 +621,8 @@ private:
     Buffer bufs_[kNumBuffers];
     Bank   banks_[kNumBanks];
     int    copyBank_ = -1;
+
+    Diagnostics diag_;
 
     // shared control
     DriftSource drift_;
