@@ -114,4 +114,109 @@ for k in range(4):
 tab['componentsData'][1:1] = strip
 json.dump(d, open(t, 'w'), indent=2)
 print('patched', t, '(beat strip bound to', handle + ')')
+
+# Labelled image buttons (text drawn into the PNGs by scripts/make_buttons.py, so no
+# Label sits on top of a Button). Each goes into an empty slot of the 4 x 4 grid:
+#   LOOPS rows 2-4: CAPTURE n / OVERDUB n / CLEAR n     MIX rows 2-3: SOLO n / MUTE n
+# CAPTURE n has one layer per Status n choice (IndexedEnabling), so the button shows
+# the bank's state: grey no history, cyan ready, orange waiting, red recording,
+# green playing, purple overdubbing.
+import glob, shutil
+for f in glob.glob('plugin/assets/buttons/*.png'):
+    shutil.copy(f, 'plugin/skins/')
+SLOT_X, SLOT_Y = [23, 343, 663, 983], [45, 196, 346, 497]
+d = json.load(open(t))
+tabs = {tb['tabName']: tb['componentDefinition'] for tb in d['pageData']['tabs']}
+reps = {r['key'] for r in d['pageData']['replacementStrings']}
+def rep(h, values):
+    if h not in reps:
+        d['pageData']['replacementStrings'].append({'key': h, 'value': values}); reps.add(h)
+def button(name, img, h, col, row, only=None):
+    b = {'version': 2 if only else 1, 'acceptsHWFocus': 'No', 'showWhenDataModelInvalid': 'Hide', 'whenVisible': 'Always',
+         'boundsType': 'Absolute', 'bounds': '%d %d 248 84' % (SLOT_X[col] + 15, SLOT_Y[row] + 12)}
+    if only: b['additionalInvalidatingHandles'] = [only]
+    return {'version': 2, 'componentData': {'version': 1, 'name': name, 'type': 'Button',
+            'data': {'version': 2, 'onImage': img + '_on.png', 'offImage': img + '_off.png', 'buttonId': 1,
+                     'numButtonsInGroup': 1, 'handleName': h, 'gestureBehaviour': 'Instant'}},
+            'handle remapping': {'version': 1, 'map': []}, 'bounds': b}
+STATUS_LOOKS = ['nohist', 'ready', 'armed', 'rec', 'play', 'dub', 'toolong']
+nb = 0
+for bank in range(3):
+    n = bank + 1
+    P = lambda nm: 'Parameter %d' % names['%s %d' % (nm, n)]
+    st = P('Status')
+    rep(st, ['No Hist', 'Ready', 'Armed', 'Rec Bar', 'Playing', 'Overdub', 'Too Long'])
+    for nm in ('Capture', 'Overdub', 'Clear', 'Solo', 'Mute'):
+        rep(P(nm), ['Off', 'On'])
+    for k, look in enumerate(STATUS_LOOKS):
+        tabs['LOOPS']['componentsData'].append(button('Capture %d %s' % (n, look), 'capture_' + look, P('Capture'), bank, 1,
+                                                       'IndexedEnabling/%d/7/%s' % (k, st)))
+    tabs['LOOPS']['componentsData'].append(button('Overdub %d' % n, 'overdub', P('Overdub'), bank, 2))
+    tabs['LOOPS']['componentsData'].append(button('Clear %d' % n, 'clear', P('Clear'), bank, 3))
+    tabs['MIX']['componentsData'].append(button('Solo %d' % n, 'solo', P('Solo'), bank, 1))
+    tabs['MIX']['componentsData'].append(button('Mute %d' % n, 'mute', P('Mute'), bank, 2))
+    nb += 11
+json.dump(d, open(t, 'w'), indent=2)
+print('patched', t, '(%d image buttons)' % nb)
+
+# Screen-mode knobs next to the buttons: Overdub n on LOOPS row 3 (a knob turn toggles
+# it), nothing on Capture / Clear rows. Solo / Mute on MIX rows 2-3.
+q = json.load(open(p))
+def slot_qlink(row, col): return 13 + col - 4 * row
+for e in q['Screen Mode Q-Links']['map']:
+    tab_name = d['pageData']['tabs'][e['Tab'] - 1]['tabName']
+    for bank in range(3):
+        if tab_name == 'LOOPS':
+            e['Q-Links']['Q-Link %d' % slot_qlink(2, bank)] = names['Overdub %d' % (bank + 1)]
+        if tab_name == 'MIX':
+            e['Q-Links']['Q-Link %d' % slot_qlink(1, bank)] = names['Solo %d' % (bank + 1)]
+            e['Q-Links']['Q-Link %d' % slot_qlink(2, bank)] = names['Mute %d' % (bank + 1)]
+json.dump(q, open(p, 'w'), indent=2)
+print('patched', p, '(knobs next to Overdub / Solo / Mute)')
+
+# Choice parameters as one-tap radio groups of image buttons (captions drawn into the
+# images), with a plain name label above them: Capture Mode / Play Mode on LOOPS,
+# Length n on SOUND.
+d = json.load(open(t))
+tabs = {tb['tabName']: tb['componentDefinition'] for tb in d['pageData']['tabs']}
+reps = {r['key'] for r in d['pageData']['replacementStrings']}
+def radio(tab, pname, choices, col, row, width):
+    h = 'Parameter %d' % names[pname]
+    if h not in reps:
+        d['pageData']['replacementStrings'].append({'key': h, 'value': choices}); reps.add(h)
+    x0, y0 = SLOT_X[col], SLOT_Y[row]
+    entries = tabs[tab]['componentsData']
+    entries.append({'version': 2, 'componentData': {'version': 1, 'name': pname + ' name', 'type': 'Label',
+                    'data': {'version': 1, 'textStyle': {'version': 1, 'font': {'version': 1, 'name': 'Titillium Web', 'style': 'Regular', 'height': 24.0},
+                                                          'colour': 'ff9a9aa0', 'justification': 'left', 'case': 'Original'},
+                             'type': 'Name', 'handleName': h}},
+                    'handle remapping': {'version': 1, 'map': []},
+                    'bounds': {'version': 1, 'acceptsHWFocus': 'No', 'showWhenDataModelInvalid': 'Hide', 'whenVisible': 'Always',
+                               'boundsType': 'Absolute', 'bounds': '%d %d 248 34' % (x0 + 15, y0 + 2)}})
+    gap = 4
+    total = len(choices) * width + (len(choices) - 1) * gap
+    for k, c in enumerate(choices):
+        img = 'seg_%s_%d' % (c.lower().replace(' ', ''), width)
+        entries.append({'version': 2, 'componentData': {'version': 1, 'name': '%s %s' % (pname, c), 'type': 'Button',
+                        'data': {'version': 2, 'onImage': img + '_on.png', 'offImage': img + '_off.png', 'buttonId': k,
+                                 'numButtonsInGroup': len(choices), 'handleName': h, 'gestureBehaviour': 'Instant'}},
+                        'handle remapping': {'version': 1, 'map': []},
+                        'bounds': {'version': 1, 'acceptsHWFocus': 'No', 'showWhenDataModelInvalid': 'Hide', 'whenVisible': 'Always',
+                                   'boundsType': 'Absolute', 'bounds': '%d %d %d 52' % (x0 + (278 - total) // 2 + k * (width + gap), y0 + 44, width)}})
+radio('LOOPS', 'Capture Mode', ['Last Bar', 'Rolling', 'Next Bar'], 3, 1, 86)
+radio('LOOPS', 'Play Mode', ['Freeze', 'On Demand', 'Continuous'], 3, 2, 86)
+for bank in range(3):
+    radio('SOUND', 'Length %d' % (bank + 1), ['1 Bar', '2 Bars', '4 Bars', '8 Bars'], bank, 0, 64)
+json.dump(d, open(t, 'w'), indent=2)
+q = json.load(open(p))
+for e in q['Screen Mode Q-Links']['map']:
+    tab_name = d['pageData']['tabs'][e['Tab'] - 1]['tabName']
+    if tab_name == 'LOOPS':
+        e['Q-Links']['Q-Link %d' % slot_qlink(1, 3)] = names['Capture Mode']
+        e['Q-Links']['Q-Link %d' % slot_qlink(2, 3)] = names['Play Mode']
+    if tab_name == 'SOUND':
+        for bank in range(3):
+            e['Q-Links']['Q-Link %d' % slot_qlink(0, bank)] = names['Length %d' % (bank + 1)]
+json.dump(q, open(p, 'w'), indent=2)
+print('patched', t, '(radio image buttons: Capture Mode, Play Mode, Length 1-3)')
 PY

@@ -15,6 +15,7 @@ This repository holds the working prototype.
 | `tests/core_tests.cpp` | Engine unit tests with a synthetic transport. |
 | `tests/scenario_host.cpp` | Loads the real plugin binary through the VST2 ABI, scripts tempo, bars, transport and button presses, and renders `ichigo-sim.wav`. |
 | `scripts/` | `build.sh`, `test.sh`, `regen_skins.sh` |
+| `assets/fonts/` | Titillium Web (SIL OFL 1.1, see `OFL.txt`), used by `scripts/make_buttons.py` to draw the button text into the skin images. |
 | `docs/CONTROLS.md` | Control, automation and trigger matrix, plus the Live III test checklist. |
 | `third_party/mpc-plugin-builder-sdk` | Official SDK as a git submodule, pinned to `febd2ca5bd9eb16c4a412837196e145566bc981b` (2026-11-07, "Add plugin format to plugin.json"). |
 
@@ -29,8 +30,9 @@ On the first run, `build.py` installs Zig into `third_party/mpc-plugin-builder-s
 The output folder is `plugin/build/Slow Ops - VST - Slow Ops Looper/`. Copy the whole folder into
 `VST2 Plugins/` at the root of a drive the MPC can see.
 
-You edit the UI in `plugin/ui.json`, then run `./scripts/regen_skins.sh`, which regenerates `plugin/skins/`
-and keeps the triggers off the Q-Links.
+You edit the UI in `plugin/ui.json`, then run `./scripts/regen_skins.sh`, which regenerates `plugin/skins/`.
+That script keeps the triggers off the Q-Links, adds the beat boxes, and drops in the labelled image buttons from
+`plugin/assets/buttons/`. To change those images, edit and run `scripts/make_buttons.py` (it needs Pillow).
 
 ## How it behaves
 
