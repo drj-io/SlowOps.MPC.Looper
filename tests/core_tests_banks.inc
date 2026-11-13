@@ -221,13 +221,31 @@ static void testMetronome()
         CHECK(clicks >= 3 && s.e.diagnostics().positionMoving && s.e.diagnostics().hostLocked,
               "no-flag host: %d clicks, moving %d, locked %d", clicks, s.e.diagnostics().positionMoving, s.e.diagnostics().hostLocked);
     }
-    // Transport stopped: no click.
+    // Transport stopped: still clicks on every beat, from the free-running internal clock.
     {
         Sim s; s.g.metronome = true; s.playing = false;
         s.runFor(2.0);
-        double pk = 0.0;
-        for (float x : s.outL) pk = std::fmax(pk, std::fabs(x));
-        CHECK(pk == 0.0, "metronome clicked with the transport stopped (%g)", pk);
+        int clicks = 0;
+        for (int64_t b = 0; b * 22050 < (int64_t)s.outL.size(); ++b)
+        {
+            double pk = 0.0;
+            for (int64_t i = b * 22050; i < b * 22050 + 1323 && i < (int64_t)s.outL.size(); ++i) pk = std::fmax(pk, std::fabs(s.outL[(size_t)i]));
+            if (pk > 1e-3) ++clicks;
+        }
+        CHECK(clicks == 4, "transport stopped: %d clicks in 2 s at 120 BPM, want 4", clicks);
+    }
+    // Stopped, but the host keeps the playing flag set over a frozen position: still clicks on every beat.
+    {
+        Sim s; s.g.metronome = true; s.playing = false; s.flagWhenStopped = true;
+        s.runFor(2.0);
+        int clicks = 0;
+        for (int64_t b = 1; b * 22050 < (int64_t)s.outL.size(); ++b)
+        {
+            double pk = 0.0;
+            for (int64_t i = b * 22050 - 600; i < b * 22050 + 1323 && i < (int64_t)s.outL.size(); ++i) pk = std::fmax(pk, std::fabs(s.outL[(size_t)i]));
+            if (pk > 1e-3) ++clicks;
+        }
+        CHECK(clicks >= 3 && !s.e.diagnostics().hostLocked, "flag set, position frozen: %d clicks, locked %d", clicks, s.e.diagnostics().hostLocked);
     }
     // Not captured: a loop recorded with the metronome on contains only the input.
     {

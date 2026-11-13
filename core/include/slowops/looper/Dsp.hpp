@@ -15,11 +15,16 @@ template <typename T> inline T clampv(T v, T lo, T hi) { return v < lo ? lo : (v
 inline int64_t wrap(int64_t i, int64_t len) { int64_t r = i % len; return r < 0 ? r + len : r; }
 
 // Gentle cubic soft clipper: ~unity below 0.5, saturates to +-1 at |x| >= 1.5.
+// Overdub limiter: exactly linear up to kClipKnee (about -2 dBFS), so a loop kept at 100 %
+// Feedback never loses level pass after pass; above it a tanh shoulder (same slope at the
+// knee) approaches +-1 smoothly, so stacked layers are limited, not hard-clipped.
+constexpr float kClipKnee = 0.8f;
 inline float softClip(float x)
 {
-    if (x >  1.5f) return 1.0f;
-    if (x < -1.5f) return -1.0f;
-    return x - (4.0f / 27.0f) * x * x * x;
+    const float a = x < 0.0f ? -x : x;
+    if (a <= kClipKnee) return x;
+    const float y = kClipKnee + (1.0f - kClipKnee) * std::tanh((a - kClipKnee) / (1.0f - kClipKnee));
+    return x < 0.0f ? -y : y;
 }
 
 // One-pole lowpass. coef == 1 is an exact pass-through.

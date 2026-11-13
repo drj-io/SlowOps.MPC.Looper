@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -26,10 +27,10 @@ static int g_fail = 0, g_pass = 0;
 // Parameter indices (plugin/src/SlowOpsLooper.cpp). Bank params: B(bank, kX), bank 0 = the bare names.
 enum P { kMix = 0, kTone, kDrift, kCapMode, kPlayMode,
          kLength, kVolume, kFeedback, kSolo, kMute, kOverdub, kCapture, kClear, kProgress, kStatus };
-static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 11;
-enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState, kClearAll, kMetronome, kClickLevel };
+static constexpr int kPerBank = 10, kNum = 5 + 3 * kPerBank + 25;
+enum Extra { kBeat = 35, kDbgTransport, kDbgPosition, kDbgBars, kDbgTaps, kDbgLast, kDbgLevel, kLoopState, kClearAll, kMetronome, kClickLevel, kMetroAuto, kMetroTap, kMonitor, kLatency, kPlayAll, kPlay1, kPlay2, kPlay3, kPlayTiming, kPlayState1, kPlayState2, kPlayState3, kPlayStateAll, kTestTone };
 static int B(int bank, int p) { return p + bank * kPerBank; }
-static bool isReadOnly(int i) { return (i >= kBeat && i < kClearAll) || (i >= 5 && i < kBeat && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
+static bool isReadOnly(int i) { return (i >= kBeat && i < kClearAll) || i == kTestTone || (i >= kPlayState1 && i <= kPlayStateAll) || (i >= 5 && i < kBeat && ((i - 5) % kPerBank == 8 || (i - 5) % kPerBank == 9)); }
 static float choice(int i, int n) { return (float)i / (float)(n - 1); }
 
 // ---- host side ----------------------------------------------------------------------
@@ -87,6 +88,7 @@ struct Plug
         if (harness)
         {
             set(kDrift, 0.0f);
+            set(kLatency, 0.5f);                   // 0 ms: the sample-exact loop checks below assume no offset
             set(B(0, kLength), 0.0f);              // 1 bar
             set(B(1, kLength), 1.0f / 3.0f);       // 2 bars
             set(B(2, kLength), 2.0f / 3.0f);       // 4 bars
@@ -281,7 +283,17 @@ static void stateRecall()
     want.push_back({kClearAll, 0.0f});
     want.push_back({kMetronome, 1.0f});
     want.push_back({kClickLevel, 0.3f});
-    CHECK((int)want.size() + 14 == kNum, "test does not cover every writable parameter");
+    want.push_back({kMetroAuto, 0.0f});
+    want.push_back({kMetroTap, 0.0f});
+    want.push_back({kMonitor, 0.0f});
+    want.push_back({kLatency, 0.3f});
+    want.push_back({kPlayAll, 0.0f});
+    want.push_back({kPlay1, 0.0f});
+    want.push_back({kPlay2, 1.0f});
+    want.push_back({kPlay3, 0.0f});
+    want.push_back({kPlayTiming, 0.5f});
+    want.push_back({kTestTone, 0.0f});
+    CHECK((int)want.size() + 18 == kNum, "test does not cover every writable parameter");
     std::vector<uint8_t> chunk;
     std::vector<std::string> texts;
     {
@@ -305,7 +317,7 @@ static void stateRecall()
     }
     // Project reload: a fresh instance, state restored, then audio starts.
     Plug b;
-    b.playing = false;   // the restored Metronome is On; stopped, it stays silent so the dry check below is exact
+    b.playing = false;
     b.disp(effSetChunk, 0, (VstIntPtr)chunk.size(), chunk.data());
     b.input = [](int64_t t, int ch) { return (float)(0.3 * std::sin(0.02 * t + ch)); };
     b.runFor(0.5);
@@ -315,6 +327,13 @@ static void stateRecall()
         CHECK(std::fabs(b.get(i) - want[k].second) < 1e-4, "param %d: %g after reload, want %g", i, b.get(i), want[k].second);
         CHECK(b.text(i) == texts[k], "param %d text: %s after reload, want %s", i, b.text(i).c_str(), texts[k].c_str());
     }
+    // The restored Metronome is On and clicks even when stopped, and the restored Monitor is Off:
+    // metronome off, Monitor on, so the dry check is exact.
+    b.set(kMetronome, 0.0f);
+    b.set(kMonitor, 1.0f);
+    b.runFor(0.05);   // past the Monitor ramp
+    b.inL.clear(); b.inR.clear(); b.outL.clear(); b.outR.clear();
+    b.runFor(0.1);
     double err = 0.0;
     for (size_t i = 0; i < b.outL.size(); ++i) err = std::fmax(err, std::fabs(b.outL[i] - b.inL[i]));
     CHECK(err == 0.0, "captured audio came back after reload (output not dry, err %g)", err);
@@ -439,6 +458,257 @@ static void beatAndDebug()
         for (int64_t i = 22050 + 2000; i < 44100 - 10; ++i) gap = std::fmax(gap, std::fabs(m.outL[(size_t)i]));
         std::printf("  metronome: beat 2 peak %.3f, between beats %.4f\n", pk, gap);
         CHECK(pk > 0.05 && pk < 0.2 && gap < 1e-6, "metronome blip wrong (peak %g, gap %g)", pk, gap);
+    }
+    // Metronome with the transport stopped: still blips on the beat (free-running clock at the host tempo).
+    {
+        Plug m; m.playing = false; m.set(kMix, 1.0f);
+        m.set(kMetronome, 1.0f);
+        m.runFor(1.0);
+        double pk = 0.0;
+        for (int64_t i = 22050; i < 22050 + 1323; ++i) pk = std::fmax(pk, std::fabs(m.outL[(size_t)i]));
+        std::printf("  metronome stopped: beat 2 peak %.3f\n", pk);
+        CHECK(pk > 0.05 && pk < 0.2, "metronome silent with transport stopped (peak %g)", pk);
+    }
+    // METRONOME button / Auto Standby. Metronome is Off / Standby / On (normalised 0 / 0.5 / 1).
+    // A tap (Metro Tap trigger) steps Off -> On -> Standby -> Off. Auto Standby (on by default)
+    // puts On into Standby when the first loop since Clear All is captured; Clear All, or
+    // clearing the last loop, brings Standby back On.
+    {
+        auto newPlug = [](bool autoOn) {
+            auto m = std::make_unique<Plug>();
+            m->set(kCapMode, choice(0, 3));
+            for (int b = 0; b < 3; ++b) m->set(B(b, kLength), 0.0f);   // 1-bar loops: quick captures
+            if (!autoOn) m->set(kMetroAuto, 0.0f);
+            m->input = [](int64_t t, int) { return (float)(0.2 * std::sin(0.03 * t)); };
+            return m;
+        };
+        auto tap = [](Plug& m) { m.set(kMetroTap, 1.0f); m.runFor(0.05); };
+        auto capture = [](Plug& m, int b) { m.set(B(b, kCapture), 1.0f); m.runFor(0.3); };
+        auto m = newPlug(true);
+        Plug& p = *m;
+        CHECK(p.text(kMetroAuto) == "On" && p.text(kMetronome) == "Off", "defaults: Auto Standby %s, Metronome %s",
+              p.text(kMetroAuto).c_str(), p.text(kMetronome).c_str());
+        tap(p);
+        CHECK(p.text(kMetronome) == "On" && p.get(kMetroTap) == 0.0f, "tap from Off: %s (tap %g)", p.text(kMetronome).c_str(), p.get(kMetroTap));
+        tap(p);
+        CHECK(p.text(kMetronome) == "Standby", "tap from On: %s", p.text(kMetronome).c_str());
+        tap(p);
+        CHECK(p.text(kMetronome) == "Off", "tap from Standby: %s", p.text(kMetronome).c_str());
+        tap(p);
+        p.runFor(5.0);
+        CHECK(p.text(kMetronome) == "On", "before loop 1: %s", p.text(kMetronome).c_str());
+        const int before = g_automateCount[kMetronome];
+        capture(p, 0);
+        CHECK(p.text(B(0, kStatus)) == "Playing" && p.text(kMetronome) == "Standby", "after loop 1: status %s, metronome %s",
+              p.text(B(0, kStatus)).c_str(), p.text(kMetronome).c_str());
+        capture(p, 1);
+        CHECK(p.text(B(1, kStatus)) == "Playing" && p.text(kMetronome) == "Standby", "after loop 2: status %s, metronome %s",
+              p.text(B(1, kStatus)).c_str(), p.text(kMetronome).c_str());
+        CHECK(g_automateCount[kMetronome] > before && g_automateValue[kMetronome] == 0.5f, "host not told the metronome went to Standby");
+        p.set(kMix, 0.0f); p.runFor(0.1);   // dry only, after the Mix ramp
+        p.outL.clear(); p.inL.clear(); p.outR.clear(); p.inR.clear();
+        p.runFor(1.0);
+        double err = 0.0;
+        for (size_t i = 0; i < p.outL.size(); ++i) err = std::fmax(err, std::fabs(p.outL[i] - p.inL[i]));
+        CHECK(err < 1e-6, "metronome audible in Standby (%g)", err);
+        // Clearing one bank of two: still Standby. Clearing the last one: On again.
+        p.set(B(1, kClear), 1.0f); p.runFor(0.1);
+        CHECK(p.text(kMetronome) == "Standby", "clearing one of two banks: %s", p.text(kMetronome).c_str());
+        p.set(B(0, kClear), 1.0f); p.runFor(0.1);
+        CHECK(p.text(kMetronome) == "On", "clearing the last loop: %s", p.text(kMetronome).c_str());
+        // Fresh count after that: the next first loop sends it to Standby again.
+        capture(p, 0);
+        CHECK(p.text(kMetronome) == "Standby", "re-armed, loop 1: %s", p.text(kMetronome).c_str());
+        // Stepped back On by hand (Standby -> Off -> On): stays On through more loops.
+        tap(p); tap(p);
+        capture(p, 1);
+        capture(p, 2);
+        CHECK(p.text(kMetronome) == "On", "metronome turned On by hand went off again: %s", p.text(kMetronome).c_str());
+        // Clear All from Standby: On.
+        tap(p);
+        CHECK(p.text(kMetronome) == "Standby", "tap to Standby: %s", p.text(kMetronome).c_str());
+        p.set(kClearAll, 1.0f); p.runFor(0.1);
+        CHECK(p.text(kMetronome) == "On" && g_automateValue[kMetronome] == 1.0f, "Clear All from Standby: %s", p.text(kMetronome).c_str());
+        // Clear All leaves Off alone.
+        tap(p); tap(p);
+        CHECK(p.text(kMetronome) == "Off", "tap twice from On: %s", p.text(kMetronome).c_str());
+        p.set(kClearAll, 1.0f); p.runFor(0.1);
+        CHECK(p.text(kMetronome) == "Off", "Clear All turned on a metronome that was Off: %s", p.text(kMetronome).c_str());
+        // An old save's Metronome On (1.0 as an Off/On switch) is still On.
+        p.set(kMetronome, 1.0f);
+        CHECK(p.text(kMetronome) == "On", "Metronome 1.0 reads %s", p.text(kMetronome).c_str());
+    }
+    // Auto Standby off: On stays On however many loops are captured.
+    {
+        Plug m; m.set(kCapMode, choice(0, 3)); m.set(kMetronome, 1.0f); m.set(kMetroAuto, 0.0f);
+        for (int b = 0; b < 3; ++b) m.set(B(b, kLength), 0.0f);
+        m.input = [](int64_t t, int) { return (float)(0.2 * std::sin(0.03 * t)); };
+        m.runFor(5.0);
+        for (int b = 0; b < 3; ++b) { m.set(B(b, kCapture), 1.0f); m.runFor(0.3); }
+        CHECK(m.text(B(2, kStatus)) == "Playing" && m.text(kMetronome) == "On", "Auto Standby off: %s after 3 loops", m.text(kMetronome).c_str());
+    }
+    // Monitor (on by default). Off: no live input in the output; loops at full level, Mix ignored.
+    {
+        Plug plain(512, false);
+        CHECK(plain.text(kMonitor) == "On", "Monitor default %s", plain.text(kMonitor).c_str());
+        Plug m; m.set(kCapMode, choice(0, 3)); m.set(B(0, kLength), 0.0f);
+        m.input = [](int64_t t, int) { return (float)(0.3 * std::sin(0.02 * t)); };
+        m.set(kMonitor, 0.0f);
+        m.runFor(0.1);
+        m.outL.clear(); m.inL.clear(); m.outR.clear(); m.inR.clear();
+        m.runFor(0.5);
+        double pk = 0.0;
+        for (float x : m.outL) pk = std::fmax(pk, std::fabs(x));
+        CHECK(pk < 1e-6, "Monitor Off, no loops: output %g, want silence", pk);
+        m.runFor(4.5);
+        m.input = [](int64_t, int) { return 0.0f; };   // after capture, the output is the loop alone
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.5);
+        CHECK(m.text(B(0, kStatus)) == "Playing", "Monitor Off: status %s", m.text(B(0, kStatus)).c_str());
+        m.outL.clear(); m.inL.clear(); m.outR.clear(); m.inR.clear();
+        m.runFor(1.0);
+        pk = 0.0;
+        for (float x : m.outL) pk = std::fmax(pk, std::fabs(x));
+        CHECK(std::fabs(pk - 0.3) < 0.01, "Monitor Off: loop peak %g, want 0.3 (full level at Mix 50 %%)", pk);
+        m.set(kMonitor, 1.0f); m.runFor(0.1);
+        m.outL.clear(); m.inL.clear(); m.outR.clear(); m.inR.clear();
+        m.runFor(1.0);
+        pk = 0.0;
+        for (float x : m.outL) pk = std::fmax(pk, std::fabs(x));
+        CHECK(std::fabs(pk - 0.3 * std::sqrt(0.5)) < 0.01, "Monitor On: loop peak %g, want 0.212 (Mix 50 %%)", pk);
+    }
+    // Latency: loop playback runs ahead by Latency ms, so a hit that reached the plugin 10 ms
+    // after the bar line (the round trip) plays back exactly on the bar line. Default 12 ms.
+    {
+        Plug plain(512, false);
+        CHECK(plain.text(kLatency).rfind("12", 0) == 0, "Latency default %s", plain.text(kLatency).c_str());
+        Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(0, 3)); m.set(B(0, kLength), 0.0f);
+        m.set(kLatency, 0.6f);   // +10 ms
+        const int64_t bar = (int64_t)std::llround(m.barSamples()), late = 441;
+        m.input = [bar](int64_t t, int) { return t % bar == late ? 1.0f : 0.0f; };
+        m.runUntil(2 * bar + bar / 2);
+        m.set(B(0, kCapture), 1.0f);
+        m.runUntil(5 * bar);
+        int64_t at = -1; float pk = 0.0f;
+        for (int64_t i = 4 * bar - bar / 2; i < 4 * bar + bar / 2; ++i)
+            if (std::fabs(m.outL[(size_t)i]) > pk) { pk = std::fabs(m.outL[(size_t)i]); at = i; }
+        std::printf("  latency 10 ms: hit recorded at +%lld, plays at %+lld from the bar line (peak %.2f)\n", (long long)late, (long long)(at - 4 * bar), pk);
+        CHECK(at == 4 * bar && pk > 0.9f, "latency 10 ms: hit plays at %+lld from the bar line, want 0", (long long)(at - 4 * bar));
+    }
+    // PLAY/STOP: master (Play All) and per bank (Play n). Master follows the transport: Stop
+    // stops the looper, Play starts it; turned On by hand with the transport stopped, every loop
+    // restarts from the top. Stopped banks keep their place.
+    {
+        Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(0, 3));
+        for (int b = 0; b < 3; ++b) m.set(B(b, kLength), 0.0f);
+        CHECK(m.text(kPlayAll) == "On" && m.text(kPlay1) == "On" && m.text(kPlay3) == "On", "PLAY defaults %s %s", m.text(kPlayAll).c_str(), m.text(kPlay1).c_str());
+        const int64_t bar = (int64_t)std::llround(m.barSamples());
+        float level = 0.25f;
+        m.input = [&level](int64_t, int) { return level; };   // DC: bank 1 = 0.25
+        m.runUntil(2 * bar + bar / 2);
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.3);
+        level = 0.5f; m.runUntil(4 * bar + bar / 2);
+        m.set(B(1, kCapture), 1.0f); m.runFor(0.3);      // bank 2 = 0.5
+        level = 0.0f; m.runFor(0.1);
+        CHECK(std::fabs(m.outL.back() - 0.75f) < 1e-3, "both banks: %g, want 0.75", m.outL.back());
+        m.set(kPlay2, 0.0f); m.runFor(0.1);
+        CHECK(std::fabs(m.outL.back() - 0.25f) < 1e-3, "bank 2 stopped: %g, want 0.25", m.outL.back());
+        m.set(kPlay2, 1.0f); m.runFor(0.1);
+        CHECK(std::fabs(m.outL.back() - 0.75f) < 1e-3, "bank 2 playing again: %g, want 0.75", m.outL.back());
+        m.set(kPlayAll, 0.0f); m.runFor(0.1);
+        CHECK(std::fabs(m.outL.back()) < 1e-6 && m.text(B(0, kStatus)) == "Playing", "master stopped: %g (loops kept: %s)", m.outL.back(), m.text(B(0, kStatus)).c_str());
+        m.set(kPlayAll, 1.0f); m.runFor(0.1);
+        CHECK(std::fabs(m.outL.back() - 0.75f) < 1e-3, "master playing again: %g", m.outL.back());
+        // Transport Stop stops the looper (and the switch shows it); transport Play starts it.
+        const int before = g_automateCount[kPlayAll];
+        m.playing = false; m.runFor(0.2);
+        CHECK(m.text(kPlayAll) == "Off" && g_automateCount[kPlayAll] > before && std::fabs(m.outL.back()) < 1e-6,
+              "transport stop: Play All %s, out %g", m.text(kPlayAll).c_str(), m.outL.back());
+        m.playing = true; m.runFor(0.2);
+        int steady = 0;   // the loop seam's equal-power crossfade bumps a DC test signal for 10 ms
+        for (size_t i = m.outL.size() - 8820; i < m.outL.size(); ++i) steady += std::fabs(m.outL[i] - 0.75f) < 1e-3;
+        CHECK(m.text(kPlayAll) == "On" && steady > 8820 * 9 / 10 && std::fabs(m.outL[m.outL.size() - 8820 + 1]) > 0.7f,
+              "transport play: Play All %s, %d of 8820 samples at 0.75, first %g", m.text(kPlayAll).c_str(), steady,
+              m.outL[m.outL.size() - 8820 + 1]);
+        // Capture into a stopped bank (master stopped too): both go to PLAY.
+        m.set(kPlay3, 0.0f); m.set(kPlayAll, 0.0f); m.runFor(0.05);
+        level = 0.125f; m.runFor(2.1);
+        m.set(B(2, kCapture), 1.0f); m.runFor(0.3);
+        CHECK(m.text(kPlay3) == "On" && m.text(kPlayAll) == "On", "capture: Play 3 %s, Play All %s", m.text(kPlay3).c_str(), m.text(kPlayAll).c_str());
+    }
+    // Master PLAY by hand with the transport stopped: every loop starts from the top, right then.
+    {
+        Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(0, 3)); m.set(B(0, kLength), 1.0f / 3.0f);   // 2-bar loop
+        const int64_t bar = (int64_t)std::llround(m.barSamples());
+        m.input = [bar](int64_t t, int) { return t % (2 * bar) == 0 ? 1.0f : (t % bar == 0 ? 0.5f : 0.0f); };   // 1.0 on bar 1, 0.5 on bar 2
+        m.runUntil(4 * bar + bar / 3);
+        m.set(B(0, kCapture), 1.0f); m.runFor(0.3);
+        m.input = [](int64_t, int) { return 0.0f; };
+        m.playing = false; m.runFor(0.2);
+        CHECK(m.text(kPlayAll) == "Off", "transport stop: Play All %s", m.text(kPlayAll).c_str());
+        m.runFor(1.3);
+        const int64_t press = m.t;
+        m.set(kPlayAll, 1.0f);
+        m.runFor(0.5);
+        float pk = 0.0f; int64_t at = -1;
+        for (int64_t i = press - 64; i < m.t; ++i)
+            if (std::fabs(m.outL[(size_t)i]) > pk) { pk = std::fabs(m.outL[(size_t)i]); at = i; }
+        std::printf("  play from stopped: loop bar 1 hit at %+lld samples from the press (peak %.2f)\n", (long long)(at - press), pk);
+        CHECK(at == press && pk > 0.9f, "restart from the top: hit at %+lld, peak %g (want 0, 1.0)", (long long)(at - press), pk);
+    }
+    // Play Timing: Immediate / Bar End / Loop End. Bank 2 is a 2-bar loop whose bars differ
+    // (A = 0.5, B = 0.3), so the output shows which bar is playing; bank 1 is 1 bar of 0.25.
+    {
+        Plug m; m.set(kMix, 1.0f); m.set(kCapMode, choice(0, 3));
+        m.set(B(0, kLength), 0.0f); m.set(B(1, kLength), 1.0f / 3.0f);
+        CHECK(m.text(kPlayTiming) == "Immediate", "Play Timing default %s", m.text(kPlayTiming).c_str());
+        const int64_t bar = (int64_t)std::llround(m.barSamples());
+        m.input = [bar](int64_t t, int) { const int64_t b = t / bar; return b < 2 ? 0.25f : b == 2 ? 0.5f : b == 3 ? 0.3f : 0.0f; };
+        m.runUntil(2 * bar + bar / 4); m.set(B(0, kCapture), 1.0f); // bank 1 = bar 1 (0.25)
+        m.runUntil(4 * bar + bar / 2); m.set(B(1, kCapture), 1.0f); // bank 2 = bars 2-3 (A, B); bar 4 plays A
+        m.runUntil(4 * bar + bar * 6 / 10);
+        auto at = [&m](int64_t i) { return m.outL[(size_t)i]; };
+        CHECK(std::fabs(m.outL.back() - 0.75f) < 1e-3, "bank 2 bar A: %g, want 0.75", m.outL.back());
+        // Loop End: stop waits for the loop to wrap (through bar B), not the next bar line.
+        m.set(kPlayTiming, 1.0f);
+        m.set(kPlay2, 0.0f); m.runFor(0.05);
+        CHECK(m.text(kPlayState2) == "Stopping" && std::fabs(m.outL.back() - 0.75f) < 1e-3, "Loop End stop: %s, %g", m.text(kPlayState2).c_str(), m.outL.back());
+        m.runUntil(6 * bar + 1000);
+        CHECK(std::fabs(at(5 * bar + 1000) - 0.55f) < 1e-3, "Loop End: bar B still plays (%g, want 0.55)", at(5 * bar + 1000));
+        CHECK(std::fabs(at(6 * bar + 600) - 0.25f) < 1e-3 && m.text(kPlayState2) == "Stopped", "Loop End: stopped at the wrap (%g, %s)",
+              at(6 * bar + 600), m.text(kPlayState2).c_str());
+        // Bar End: start waits for the next bar line, then comes in at full level on that sample.
+        m.runUntil(6 * bar + bar / 2);
+        m.set(kPlayTiming, 0.5f);
+        m.set(kPlay2, 1.0f); m.runFor(0.05);
+        CHECK(m.text(kPlayState2) == "Starting", "Bar End start: %s", m.text(kPlayState2).c_str());
+        m.runUntil(7 * bar + 1000);
+        CHECK(std::fabs(at(7 * bar - 2000) - 0.25f) < 1e-3, "Bar End: started early (%g)", at(7 * bar - 2000));
+        CHECK(std::fabs(at(7 * bar) - 0.55f) < 1e-3 && m.text(kPlayState2) == "Playing", "Bar End: on the bar line %g (want 0.55, crisp), %s",
+              at(7 * bar), m.text(kPlayState2).c_str());
+        // Bar End stop of the master: everything stops on the next bar line (bar 7 plays B).
+        m.runUntil(7 * bar + bar / 2);
+        m.set(kPlayAll, 0.0f); m.runFor(0.05);
+        CHECK(m.text(kPlayStateAll) == "Stopping", "master Bar End stop: %s", m.text(kPlayStateAll).c_str());
+        m.runUntil(8 * bar + 1000);
+        CHECK(std::fabs(at(8 * bar - 2000) - 0.55f) < 1e-3 && std::fabs(at(8 * bar + 600)) < 1e-6 && m.text(kPlayStateAll) == "Stopped",
+              "master Bar End stop: before %g, after %g, %s", at(8 * bar - 2000), at(8 * bar + 600), m.text(kPlayStateAll).c_str());
+        // Immediate: within the 5 ms gate.
+        m.set(kPlayAll, 1.0f); m.runUntil(9 * bar + 1000);   // Bar End start (transport playing)
+        m.set(kPlayTiming, 0.0f);
+        const int64_t tap = m.t;
+        m.set(kPlay1, 0.0f); m.runFor(0.05);
+        CHECK(std::fabs(at(tap + 300) - 0.3f) < 1e-3 && m.text(kPlayState1) == "Stopped", "Immediate stop: %g (want 0.3: bank 2 bar B), %s",
+              at(tap + 300), m.text(kPlayState1).c_str());
+    }
+    // Test tone: off by default; on, a steady -20 dBFS 440 Hz even with the transport stopped.
+    {
+        Plug tt; tt.playing = false;
+        CHECK(tt.text(kTestTone) == "Off", "test tone default %s", tt.text(kTestTone).c_str());
+        tt.set(kTestTone, 1.0f);
+        tt.runFor(0.5);
+        double pk = 0.0;
+        for (size_t i = 11025; i < tt.outL.size(); ++i) pk = std::fmax(pk, std::fabs(tt.outL[i] - tt.inL[i]));
+        CHECK(std::fabs(pk - 0.1) < 0.002, "test tone peak %g, want 0.1", pk);
     }
     // Stopped transport: the beat keeps counting on the internal clock.
     p.playing = false;

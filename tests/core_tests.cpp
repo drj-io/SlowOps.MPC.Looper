@@ -26,6 +26,7 @@ struct Sim
     int num = 4, den = 4;
     bool playing = true;
     bool reportPlaying = true;   // false: host advances its position but never sets the playing flag
+    bool flagWhenStopped = false;   // true: host keeps the playing flag set while stopped (position frozen)
     double ppq = 0.0;          // host song position (advances only while playing)
     int block = 128;
     bool inPlace = false;
@@ -52,7 +53,7 @@ struct Sim
             const int n = (int)std::min<int64_t>(block, end - t);
             for (int i = 0; i < n; ++i) { bl[i] = input(t + i, 0); br[i] = input(t + i, 1); }
             TransportInfo ti;
-            ti.playing = playing && reportPlaying; ti.ppqValid = true; ti.barsValid = true; ti.bpm = bpm;
+            ti.playing = (playing && reportPlaying) || flagWhenStopped; ti.ppqValid = true; ti.barsValid = true; ti.bpm = bpm;
             ti.timeSigNumerator = num; ti.timeSigDenominator = den; ti.ppqPos = ppq;
             const double barQ = num * 4.0 / den;
             ti.barStartPpq = std::floor(ppq / barQ + 1e-9) * barQ;
@@ -259,8 +260,31 @@ static void testFeedbackDecay()
         {
             const double db = 20.0 * std::log10(pk[(size_t)k] / pk[(size_t)k - 1]);
             const double want = 20.0 * std::log10((double)fb);
-            CHECK(std::fabs(db - want) < 0.5, "fb %.1f pass %d: %.2f dB per pass, want %.2f", fb, k, db, want);
+            CHECK(std::fabs(db - want) < 0.05, "fb %.1f pass %d: %.2f dB per pass, want %.2f", fb, k, db, want);
         }
+    }
+    // Feedback 100 %: overdubbing with nothing played keeps the loop exactly as it was.
+    {
+        auto pk = passPeaks(PlaybackMode::ContinuousOverdub, 1.0f);
+        std::printf("  Continuous fb=1.0 pass peaks:");
+        for (double v : pk) std::printf(" %.4f", v);
+        std::printf("\n");
+        CHECK(pk[1] > 0.2, "fb 1.0: burst not recorded (%g)", pk[1]);
+        for (int k = 2; k < 6; ++k)
+            CHECK(std::fabs(20.0 * std::log10(pk[(size_t)k] / pk[1])) < 0.01, "fb 1.0 pass %d: %.3f dB vs pass 1, want 0", k,
+                  20.0 * std::log10(pk[(size_t)k] / pk[1]));
+    }
+    // The overdub limiter: linear up to the knee, smooth above it, never past full scale.
+    {
+        float worst = 0.0f, prev = 0.0f; bool mono = true;
+        for (int i = 0; i <= 4000; ++i)
+        {
+            const float x = i * 0.001f, y = softClip(x);
+            if (x <= kClipKnee) worst = std::fmax(worst, std::fabs(y - x));
+            if (y < prev || y > 1.0f || std::fabs(softClip(-x) + y) > 0.0f) mono = false;
+            prev = y;
+        }
+        CHECK(worst == 0.0f && mono && softClip(4.0f) > 0.99f, "softClip: off by %g below the knee, monotonic/bounded %d", worst, mono);
     }
     auto fr = passPeaks(PlaybackMode::Freeze, 0.5f);
     CHECK(fr[1] < 1e-6 && fr[5] < 1e-6, "Freeze recorded the burst (%g)", fr[5]);

@@ -60,8 +60,23 @@ public:
         kDbgLoopLevel,
         kLoopState,      // Idle / Armed / Rec / Play / Dub: colours the beat boxes
         kClearAll,       // trigger: clears every bank (same self-resetting behaviour as Clear n)
-        kMetronome,      // click on every beat while the MPC transport plays (output only, never recorded)
+        kMetronome,      // Off / Standby / On. On: a pop on every beat, transport playing or stopped (output only,
+                         // never recorded). Standby: silent, back On at the next Clear All or when the last loop is cleared.
         kClickLevel,     // metronome level, 0..100 % (50 % is about -19 dBFS peak)
+        kMetroAuto,      // on (default): Metronome goes On -> Standby when the first loop since Clear All is captured
+        kMetroTap,       // trigger (the METRONOME button): steps Metronome Off -> On -> Standby -> Off
+        kMonitor,        // On (default): live input in the output, blended by Mix. Off: the MPC monitors the live
+                         // input; the plugin outputs only the loops (full level, Mix ignored) and the metronome.
+        kLatency,        // ms, -50..50 (default 12): loop playback runs this far ahead, to undo the MPC's round trip
+        kPlayAll,        // master PLAY/STOP (On = playing). Follows the transport: Stop stops it, Play starts it.
+                         // Turned On by hand with the transport stopped: every loop restarts from the top. Never
+                         // starts the MPC transport.
+        kPlay1,          // Play 1..3: per-bank PLAY/STOP (On = playing); stopped banks keep their place
+        kPlay3 = kPlay1 + 2,
+        kPlayTiming,     // Immediate / Bar End / Loop End: when a PLAY/STOP tap takes effect
+        kPlayState1,     // read-only Play State 1..3, then Play All State: Stopped / Playing / Starting /
+        kPlayStateAll = kPlayState1 + 3,   // Stopping; picks the PLAY/STOP button's image layer
+        kTestTone,       // DEBUG: steady quiet 440 Hz added to the output, independent of transport and loops
         kEnd
     };
     static constexpr int kNumParams = kEnd;
@@ -87,7 +102,7 @@ public:
             auto name = [&](const char* base) { return std::string(base) + " " + n; };
             addParam(mpc::choiceParam(id("len", nullptr).c_str(), name("Length").c_str(), {"1 Bar", "2 Bars", "4 Bars", "8 Bars"}, defaultLength[b]));
             addParam(mpc::floatParam(id("vol", nullptr).c_str(), name("Volume").c_str(), 0.0f, 100.0f, 100.0f, "%", 0));
-            addParam(mpc::floatParam(id("fb", "feedback").c_str(), name("Feedback").c_str(), 0.0f, 100.0f, 70.0f, "%", 0));
+            addParam(mpc::floatParam(id("fb", "feedback").c_str(), name("Feedback").c_str(), 0.0f, 100.0f, 100.0f, "%", 0));
             addParam(mpc::boolParam(id("solo", nullptr).c_str(), name("Solo").c_str(), false));
             addParam(mpc::boolParam(id("mute", nullptr).c_str(), name("Mute").c_str(), false));
             addParam(mpc::boolParam(id("overdub", "overdub").c_str(), name("Overdub").c_str(), false));
@@ -116,8 +131,30 @@ public:
         state.automatable = false;
         addParam(state);
         addParam(mpc::boolParam("clearall", "Clear All", false));
-        addParam(mpc::boolParam("metro", "Metronome", false));
+        // Off = 0 and On = 1.0 normalised, as when this was an Off/On switch, so older saves load unchanged.
+        addParam(mpc::choiceParam("metro", "Metronome", {"Off", "Standby", "On"}, 0));
         addParam(mpc::floatParam("clicklvl", "Click Level", 0.0f, 100.0f, 50.0f, "%", 0));
+        addParam(mpc::boolParam("metroauto", "Auto Standby", true));   // id kept: older saves still load it
+        addParam(mpc::boolParam("metrotap", "Metro Tap", false));
+        addParam(mpc::boolParam("monitor", "Monitor", true));
+        // MPC XL at 44.1 kHz / 128: 256-sample input + 384-sample output buffers plus USB and converters, about 12 ms.
+        addParam(mpc::floatParam("latency", "Latency", -50.0f, 50.0f, 12.0f, "ms", 1));
+        addParam(mpc::boolParam("playall", "Play All", true));
+        for (int b = 0; b < kBanks; ++b)
+            addParam(mpc::boolParam(("play" + std::to_string(b + 1)).c_str(), ("Play " + std::to_string(b + 1)).c_str(), true));
+        addParam(mpc::choiceParam("playtiming", "Play Timing", {"Immediate", "Bar End", "Loop End"}, 0));
+        for (int b = 0; b <= kBanks; ++b)
+        {
+            const std::string n = b < kBanks ? std::to_string(b + 1) : std::string("all");
+            mpc::Param ps = mpc::choiceParam(("playstate" + n).c_str(),
+                (b < kBanks ? "Play State " + n : std::string("Play All State")).c_str(),
+                {"Stopped", "Playing", "Starting", "Stopping"}, 1);
+            ps.automatable = false;
+            addParam(ps);
+        }
+        mpc::Param tone = mpc::boolParam("testtone", "Test Tone", false);
+        tone.automatable = false;
+        addParam(tone);
         if (numParams() != kNumParams) mpc::log("SlowOpsLooper: parameter count mismatch");
         // No built-in programs beyond "Default": a program writes every parameter,
         // which must never fire Capture or Clear.
@@ -140,7 +177,8 @@ public:
         for (int b = 0; b < kBanks; ++b)
             for (int p : {kCapture, kClear})
                 if (getNormalised(idx(b, p)) >= 0.5f) { setNormalised(idx(b, p), 0.0f); notifyHostParameterChanged(idx(b, p)); }
-        if (getNormalised(kClearAll) >= 0.5f) { setNormalised(kClearAll, 0.0f); notifyHostParameterChanged(kClearAll); }
+        for (int p : {kClearAll, kMetroTap})
+            if (getNormalised(p) >= 0.5f) { setNormalised(p, 0.0f); notifyHostParameterChanged(p); }
         statusHoldLeft_ = statusHoldSamples_;
     }
 
@@ -156,6 +194,9 @@ public:
                 setNormalised(idx(b, kCapture), 0.0f);
                 notifyHostParameterChanged(idx(b, kCapture));
                 engine_.requestCapture(b);
+                // A capture is meant to be heard: its bank and the master go to PLAY (no restart).
+                if (!getBool(kPlay1 + b)) setSwitch(kPlay1 + b, true);
+                if (!getBool(kPlayAll)) { setSwitch(kPlayAll, true); playAllWas_ = true; }
             }
             if (getNormalised(idx(b, kClear)) >= 0.5f)
             {
@@ -170,15 +211,35 @@ public:
             setNormalised(kClearAll, 0.0f);
             notifyHostParameterChanged(kClearAll);
             for (int b = 0; b < kBanks; ++b) engine_.requestClear(b);
+            metroRearm_ = true;
+        }
+        if (getNormalised(kMetroTap) >= 0.5f)
+        {
+            setNormalised(kMetroTap, 0.0f);
+            notifyHostParameterChanged(kMetroTap);
+            const int st = getInt(kMetronome);
+            setMetronome(st == kMetroOff ? kMetroOn : st == kMetroOn ? kMetroStandby : kMetroOff);
         }
 
         looper::GlobalParams g;
         g.mix = get(kMix) * 0.01f;
+        g.monitor = getBool(kMonitor);
+        g.latencyMs = get(kLatency);
+        g.playTiming = (looper::PlayTiming)getInt(kPlayTiming);
+
+        // Master PLAY/STOP turned On by hand while the transport is stopped: restart the
+        // internal bar clock and every loop from the top. (Transport edges: after process.)
+        {
+            const bool playAll = getBool(kPlayAll);
+            if (playAll && !playAllWas_ && !hostWasRunning_) engine_.restartFromTop();
+            playAllWas_ = playAll;
+            g.playAll = playAll;
+        }
         g.tone = get(kTone) * 0.01f;
         g.drift = get(kDrift) * 0.01f;
         g.captureMode = (looper::CaptureMode)getInt(kCaptureMode);
         g.playbackMode = (looper::PlaybackMode)getInt(kPlayMode);
-        g.metronome = getBool(kMetronome);
+        g.metronome = getInt(kMetronome) == kMetroOn;
         g.clickLevel = get(kClickLevel) * 0.01f;
         looper::BankParams bp[kBanks];
         for (int b = 0; b < kBanks; ++b)
@@ -189,6 +250,7 @@ public:
             bp[b].solo = getBool(idx(b, kSolo));
             bp[b].mute = getBool(idx(b, kMute));
             bp[b].overdub = getBool(idx(b, kOverdub));
+            bp[b].play = getBool(kPlay1 + b);
         }
 
         const mpc::Transport& t = ctx.transport;
@@ -208,6 +270,58 @@ public:
         float* outR = ctx.numOutputs > 1 ? ctx.outputs[1] : ctx.outputs[0];
         engine_.process(inL, inR, outL, outR, ctx.numFrames, ti, g, bp);
         snapshotDiagnostics(t);
+
+        // Master PLAY/STOP follows the transport: Stop stops the looper, Play starts it.
+        // The engine already did so this block; make the switch show it.
+        {
+            const bool running = engine_.diagnostics().hostRunning;
+            if (running != hostWasRunning_)
+            {
+                hostWasRunning_ = running;
+                if (getBool(kPlayAll) != running) setSwitch(kPlayAll, running);
+                playAllWas_ = running;
+            }
+        }
+
+        // Auto Standby: the metronome is for laying down the first loops. Clear All, or
+        // clearing the last loop, starts a fresh count and wakes a Standby metronome;
+        // when the first loop after that is captured, On goes to Standby (once: a
+        // metronome stepped back On by hand stays On).
+        {
+            bool anyLoop = false;
+            for (int b = 0; b < kBanks; ++b) anyLoop = anyLoop || engine_.hasLoop(b);
+            const int64_t done = engine_.diagnostics().loopsCompleted;
+            if (metroRearm_ || (hadLoop_ && !anyLoop))
+            {
+                metroBase_ = done;
+                metroAutoDone_ = false;
+                if (getInt(kMetronome) == kMetroStandby) setMetronome(kMetroOn);
+            }
+            metroRearm_ = false;
+            hadLoop_ = anyLoop;
+            if (done - metroBase_ >= 1 && !metroAutoDone_)
+            {
+                metroAutoDone_ = true;
+                if (getBool(kMetroAuto) && getInt(kMetronome) == kMetroOn) setMetronome(kMetroStandby);
+            }
+        }
+
+        // DEBUG test tone: proves whether audio the plugin generates reaches the MPC's output.
+        if (getBool(kTestTone))
+        {
+            const double w = 2.0 * 3.14159265358979 * 440.0 / sampleRate();
+            const double cw = std::cos(w), sw = std::sin(w);
+            for (int i = 0; i < ctx.numFrames; ++i)
+            {
+                const double ns = toneS_ * cw + toneC_ * sw;
+                toneC_ = toneC_ * cw - toneS_ * sw; toneS_ = ns;
+                const float x = 0.1f * (float)toneS_;   // -20 dBFS
+                outL[i] += x;
+                if (outR != outL) outR[i] += x;
+            }
+            const double m = std::sqrt(toneS_ * toneS_ + toneC_ * toneC_);
+            toneS_ /= m; toneC_ /= m;
+        }
 
         if (statusHoldLeft_ > 0) { statusHoldLeft_ -= ctx.numFrames; return; }
 
@@ -234,6 +348,27 @@ public:
         static const int kStateChoice[5] = {0, 3, 4, 1, 2};   // priority -> Idle, Play, Dub, Armed, Rec
         const float stateNorm = (float)kStateChoice[state] / 4.0f;
         if (getNormalised(kLoopState) != stateNorm) { setNormalised(kLoopState, stateNorm); notifyHostParameterChanged(kLoopState); }
+
+        // PLAY/STOP buttons: one image layer per state; Starting / Stopping while a tap waits for
+        // the Play Timing boundary. The master shows waiting while any bank waits.
+        {
+            bool anyStarting = false, anyStopping = false;
+            for (int b = 0; b <= kBanks; ++b)
+            {
+                int ps;
+                if (b < kBanks)
+                {
+                    ps = (int)engine_.playState(b);
+                    anyStarting = anyStarting || ps == (int)looper::PlayState::Starting;
+                    anyStopping = anyStopping || ps == (int)looper::PlayState::Stopping;
+                }
+                else
+                    ps = (int)(getBool(kPlayAll) ? (anyStarting ? looper::PlayState::Starting : looper::PlayState::Playing)
+                                                 : (anyStopping ? looper::PlayState::Stopping : looper::PlayState::Stopped));
+                const float norm = (float)ps / 3.0f;
+                if (getNormalised(kPlayState1 + b) != norm) { setNormalised(kPlayState1 + b, norm); notifyHostParameterChanged(kPlayState1 + b); }
+            }
+        }
 
         // DEBUG readouts: bump a readout's value whenever its text changes (so the MPC
         // redraws it), at most every 100 ms.
@@ -299,6 +434,11 @@ public:
     }
 
 private:
+    enum { kMetroOff = 0, kMetroStandby = 1, kMetroOn = 2 };   // Metronome choices
+    // Set Metronome from the plugin and tell the host, so the MPC's copy and the button follow.
+    void setSwitch(int i, bool on) { setNormalised(i, on ? 1.0f : 0.0f); notifyHostParameterChanged(i); }
+    void setMetronome(int st) { setNormalised(kMetronome, (float)st * 0.5f); notifyHostParameterChanged(kMetronome); }
+
     static mpc::PluginInfo makeInfo()
     {
         mpc::PluginInfo info;
@@ -395,12 +535,19 @@ private:
         return buf;
     }
 
+    double toneS_ = 0.0, toneC_ = 1.0;
     looper::LooperEngine engine_;
     int debugMinSamples_ = 4410, debugAge_ = 0;
     int debugCounter_[kNumDebug] = {};
     uint64_t debugLastKey_[kNumDebug] = {};
     int statusHoldSamples_ = 11025;
     int statusHoldLeft_ = 0;
+    int64_t metroBase_ = 0;          // engine loopsCompleted at the last re-arm (Clear All / last loop cleared)
+    bool metroRearm_ = false;        // Clear All pressed this block
+    bool metroAutoDone_ = false;     // the first-loop On -> Standby already happened since the last re-arm
+    bool hadLoop_ = false;           // any bank held a loop last block
+    bool hostWasRunning_ = false;    // transport state last block (edges drive Play All)
+    bool playAllWas_ = true;         // Play All last block (a hand-made Off -> On restarts from the top)
     int progressMinSamples_ = 1764;
     int progressAge_[kBanks] = {};
 };

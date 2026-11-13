@@ -42,6 +42,10 @@ namespace slowops::looper {
 
 enum class CaptureMode : int { LastCompleteBar = 0, RollingBar = 1, NextBar = 2 };
 enum class PlaybackMode : int { Freeze = 0, OverdubOnDemand = 1, ContinuousOverdub = 2 };
+// When a PLAY/STOP tap takes effect: now, on the next bar line, or when that bank's loop wraps.
+enum class PlayTiming : int { Immediate = 0, BarEnd = 1, LoopEnd = 2 };
+// A bank's play state; Starting / Stopping = waiting for the PlayTiming boundary.
+enum class PlayState : int { Stopped = 0, Playing = 1, Starting = 2, Stopping = 3 };
 
 // Order matters: the MPC adapter maps this 1:1 onto its Status choice parameters.
 enum class Status : int
@@ -64,6 +68,7 @@ struct Diagnostics
 {
     bool    playing = false, ppqValid = false, hostLocked = false;
     bool    positionMoving = false;   // host song position advancing with the audio (flag or not)
+    bool    hostRunning = false;      // the transport counts as playing (flag, or position advancing)
     double  bpm = 0.0, ppqPos = 0.0, barLen = 0.0;
     int     timeSigNumerator = 4, timeSigDenominator = 4;
     int     beat = 0;                 // beat within the bar, 0-based
@@ -71,6 +76,7 @@ struct Diagnostics
     int64_t discontinuities = 0;      // transport jumps / starts
     int64_t captureRequests[3] = {};  // per bank
     int64_t clearRequests[3] = {};
+    int64_t loopsCompleted = 0;       // captures that finished and started playing (any bank)
     int     lastBank = -1;
     CaptureResult lastResult = CaptureResult::None;
     int64_t lastLength = 0;           // samples of the last queued capture
@@ -82,20 +88,27 @@ struct GlobalParams
     float tone = 1.0f;    // 0..1  loop lowpass, 400 Hz .. 18 kHz (1 = flat)
     float drift = 0.15f;  // 0..1  tape wow depth on loop playback
     float mix = 0.5f;     // 0..1  equal-power live/loops blend (dry only while no loop exists)
+    bool  monitor = true; // false: no live input in the output (the host monitors it) and loops at full level, Mix ignored
+    PlayTiming playTiming = PlayTiming::Immediate;
+    bool  playAll = true;    // master PLAY/STOP. The engine follows transport edges on the same block (see
+                             // Diagnostics::hostRunning); the caller then sets this to match.
+    float latencyMs = 0.0f;  // loop playback runs this far ahead (negative: behind), -50..50 ms. Compensates the
+                             // round trip: you play to what you hear, so your playing reaches the plugin late.
     CaptureMode  captureMode = CaptureMode::LastCompleteBar;
     PlaybackMode playbackMode = PlaybackMode::OverdubOnDemand;
-    bool  metronome = false;   // click on every beat while the host transport plays
+    bool  metronome = false;   // click on every beat, transport playing or stopped
     float clickLevel = 0.5f;   // 0..1 (squared law; 0.5 is about -18 dBFS peak)
 };
 
 struct BankParams
 {
     int   lengthBars = 1;    // 1, 2, 4 or 8; applies to the next capture
-    float feedback = 0.7f;   // 0..1  share of the previous pass kept while overdubbing
+    float feedback = 1.0f;   // 0..1  share of the previous pass kept while overdubbing (1 = layers stack, nothing fades)
     float volume = 1.0f;     // 0..1  (squared law: 1 = unity)
     bool  solo = false;      // when any bank is soloed, only soloed banks are heard
     bool  mute = false;
     bool  overdub = false;   // used by OverdubOnDemand
+    bool  play = true;       // false: silent and not overdubbing (20 ms fade); keeps its place, so it comes back in time
 };
 
 class LooperEngine
@@ -107,13 +120,14 @@ public:
     static constexpr double kSwapSeconds  = 0.020;   // old loop -> new loop crossfade
     static constexpr double kFadeSeconds  = 0.020;   // loop presence fade (first capture / clear)
     static constexpr double kGainSeconds  = 0.020;   // volume / solo / mute ramps
+    static constexpr double kGateSeconds  = 0.005;   // PLAY/STOP gate (a start from the top is instant)
     static constexpr double kDubSeconds   = 0.010;   // overdub engage ramp
     static constexpr double kHoldSeconds  = 2.0;     // how long a refused capture stays on screen
     static constexpr double kMaxDriftSec  = 0.006;   // max drift read offset
     static constexpr int64_t kCopyChunk   = 131072;  // frames copied per block (memcpy)
     static constexpr int64_t kCopyMargin  = 16384;   // history kept free for in-flight copies
     static constexpr int    kMaxDownbeats = 16;
-    static constexpr double kClickSeconds = 0.030;   // metronome blip length
+    static constexpr double kClickSeconds = 0.012;   // metronome pop length
 
     // ---- setup (allocates) -------------------------------------------------
     // maxLoopSeconds: longest loop per bank. extraHistorySeconds: history beyond
@@ -144,20 +158,26 @@ public:
         {
             k.presence.setTime((int)std::lround(kFadeSeconds * sampleRate));
             k.gain.setTime((int)std::lround(kGainSeconds * sampleRate));
+            k.gate.setTime((int)std::lround(kGateSeconds * sampleRate));
             k.dub.setTime((int)std::lround(kDubSeconds * sampleRate));
         }
         drift_.prepare(sampleRate);
-        // Metronome blips: a decaying sine, 2.2 kHz on the downbeat, 1.6 kHz otherwise.
+        // Metronome pops: a very short sine burst whose pitch drops fast (like a mouth pop
+        // or a tapped bottle), 1.4 kHz -> 500 Hz on the downbeat, 1.0 kHz -> 350 Hz otherwise.
+        // 0.2 ms attack, 2 ms decay, so it is over in about 12 ms.
         const int clickLen = (int)std::lround(kClickSeconds * sampleRate);
         for (int a = 0; a < 2; ++a)
         {
-            const double hz = a ? 2200.0 : 1600.0;
+            const double hzStart = a ? 1400.0 : 1000.0, hzEnd = a ? 500.0 : 350.0;
             clickTable_[a].assign((size_t)clickLen, 0.0f);
+            double phase = 0.0;
             for (int i = 0; i < clickLen; ++i)
             {
                 const double t = i / sampleRate;
-                const double env = std::exp(-t / 0.006) * std::fmin(1.0, i / (0.0005 * sampleRate));
-                clickTable_[a][(size_t)i] = (float)(env * std::sin(2.0 * kPi * hz * t) * (a ? 1.0 : 0.7));
+                const double hz = hzEnd + (hzStart - hzEnd) * std::exp(-t / 0.0015);
+                const double env = std::exp(-t / 0.002) * std::fmin(1.0, i / (0.0002 * sampleRate));
+                clickTable_[a][(size_t)i] = (float)(env * std::sin(phase) * (a ? 1.0 : 0.7));
+                phase += 2.0 * kPi * hz / sampleRate;
             }
         }
         prepared_ = true;
@@ -186,6 +206,7 @@ public:
             k.captureReq.store(false);
             k.clearReq.store(false);
             k.firstBlock = true;
+            k.gate.snap(k.on ? 1.0f : 0.0f);
         }
         mixFirst_ = true;
         clickPos_ = -1;
@@ -193,9 +214,18 @@ public:
     }
 
     void requestCapture(int bank) { if (bank >= 0 && bank < kNumBanks) banks_[bank].captureReq.store(true, std::memory_order_release); }
+    // With the transport stopped: restart the internal bar clock and every loop from the top
+    // at the next process() (audio thread only). Ignored while the transport plays.
+    void restartFromTop() { restartReq_ = true; }
     void requestClear(int bank)   { if (bank >= 0 && bank < kNumBanks) banks_[bank].clearReq.store(true, std::memory_order_release); }
 
     Status  status(int bank) const      { return banks_[bank].status; }
+    PlayState playState(int bank) const
+    {
+        const Bank& k = banks_[bank];
+        if (k.on == k.wantOn) return k.on ? PlayState::Playing : PlayState::Stopped;
+        return k.wantOn ? PlayState::Starting : PlayState::Stopping;
+    }
     bool    hasLoop(int bank) const     { return banks_[bank].valid && !banks_[bank].clearing; }
     int64_t loopLength(int bank) const  { return banks_[bank].valid ? banks_[bank].len : 0; }
     int     loopBars(int bank) const    { return banks_[bank].valid ? banks_[bank].bars : 0; }
@@ -232,11 +262,42 @@ public:
                 advancing = transport.ppqPos > prevPpq_ && std::fabs(transport.ppqPos - expected) <= tol;
             }
             advanceRun_ = advancing ? advanceRun_ + 1 : 0;
+            // A playing flag over a song position that does not move is a stopped host
+            // (the MPC may keep the flag set while stopped): two still blocks count.
+            const bool still = transport.ppqValid && havePrevPpq_ && std::isfinite(transport.ppqPos) && transport.ppqPos == prevPpq_;
+            stillRun_ = still && !(transport.playing && !prevFlag_) ? stillRun_ + 1 : 0;   // a fresh Play flag is believed
+            prevFlag_ = transport.playing;
             havePrevPpq_ = transport.ppqValid && std::isfinite(transport.ppqPos);
             prevPpq_ = transport.ppqPos;
             prevFrames_ = numFrames;
-            tp.playing = transport.playing || advanceRun_ >= 2;
+            tp.playing = (transport.playing && stillRun_ < 2) || advanceRun_ >= 2;
             diag_.positionMoving = advanceRun_ >= 2;
+            diag_.hostRunning = tp.playing;
+        }
+        // Master PLAY/STOP follows the transport from the very block it starts or stops,
+        // until the caller's playAll catches up (it reads hostRunning after this block).
+        bool startNow = false, stopNow = false;
+        timing_ = g.playTiming;
+        if (tp.playing != wasRunning_)
+        {
+            wasRunning_ = tp.playing;
+            masterForced_ = tp.playing ? 1 : 0;
+            startNow = tp.playing;
+            stopNow = !tp.playing;
+        }
+        if (masterForced_ >= 0 && (masterForced_ == 1) == g.playAll) masterForced_ = -1;
+        const bool master = masterForced_ >= 0 ? masterForced_ == 1 : g.playAll;
+        if (restartReq_)
+        {
+            // From the top: the internal clock starts bar 1 now (a discontinuity, so an armed
+            // Next Bar capture starts recording) and every loop goes back to its own bar 1.
+            restartReq_ = false;
+            if (!tp.playing)
+            {
+                startNow = true;
+                clock_.reset();
+                for (Bank& k : banks_) if (k.valid) k.idx = wrap((int64_t)std::llround(k.offsetBar), k.len);
+            }
         }
         const ClockBlock cb = clock_.advance(tp, numFrames);
         barLen_ = cb.barLen;
@@ -279,12 +340,14 @@ public:
         // ---- per-block control values ----
         const double toneHz = 400.0 * std::pow(18000.0 / 400.0, (double)clampv(g.tone, 0.0f, 1.0f));
         const float mixA = (float)(clampv(g.mix, 0.0f, 1.0f) * kPi * 0.5);
-        const float dryT = g.mix >= 1.0f ? 0.0f : std::cos(mixA);
-        const float wetT = g.mix <= 0.0f ? 0.0f : std::sin(mixA);
+        const float dryT = !g.monitor ? 1.0f : g.mix >= 1.0f ? 0.0f : std::cos(mixA);   // Monitor Off: live gated by monT below
+        const float wetT = !g.monitor ? 1.0f : g.mix <= 0.0f ? 0.0f : std::sin(mixA);
+        const float monT = g.monitor ? 1.0f : 0.0f;
         const float drT = clampv(g.drift, 0.0f, 1.0f) * maxDrift_;
-        if (mixFirst_) { dryMix_ = dryT; wetMix_ = wetT; driftDepth_ = drT; mixFirst_ = false; }
+        const float latT = (float)(clampv((double)g.latencyMs, -50.0, 50.0) * 0.001 * sr_);
+        if (mixFirst_) { dryMix_ = dryT; wetMix_ = wetT; driftDepth_ = drT; monMix_ = monT; latency_ = latT; mixFirst_ = false; }
         const float inv = 1.0f / (float)numFrames;
-        const float dDry = (dryT - dryMix_) * inv, dWet = (wetT - wetMix_) * inv, dDr = (drT - driftDepth_) * inv;
+        const float dDry = (dryT - dryMix_) * inv, dWet = (wetT - wetMix_) * inv, dDr = (drT - driftDepth_) * inv, dMon = (monT - monMix_) * inv;
 
         bool anySolo = false;
         for (int b = 0; b < kNumBanks; ++b) anySolo = anySolo || bp[b].solo;
@@ -303,8 +366,14 @@ public:
             const float v = clampv(bp[b].volume, 0.0f, 1.0f);
             const float gainT = audible ? v * v : 0.0f;
             if (k.firstBlock) k.gain.snap(gainT); else k.gain.setTarget(gainT);
+            // PLAY/STOP: applied now (Immediate, transport edges, master restart, no loop to time it
+            // by), else at the next bar line / loop wrap (onDownbeat, the per-sample loop).
+            k.wantOn = bp[b].play && master;
+            if (k.on != k.wantOn && (timing_ == PlayTiming::Immediate || startNow || stopNow || !k.valid || k.clearing))
+                setOn(k, k.wantOn, startNow || !k.valid);
+            else if (startNow && k.on) k.gate.snap(1.0f);   // from the top: the downbeat is not faded in
             k.firstBlock = false;
-            k.wantDub = k.valid && !k.clearing &&
+            k.wantDub = k.valid && !k.clearing && k.on && k.wantOn &&
                 (g.playbackMode == PlaybackMode::ContinuousOverdub ||
                  (g.playbackMode == PlaybackMode::OverdubOnDemand && bp[b].overdub));
             k.dub.setTarget(k.wantDub ? 1.0f : 0.0f);
@@ -312,8 +381,10 @@ public:
         drift_.renormalise();
 
         // Metronome: beat boundaries in this block (nearest sample, like downbeats).
+        // Runs whether or not the transport plays: stopped, it follows the free-running
+        // internal clock at the host tempo, so you can hear it before pressing Play.
         int beatOffsets[64]; int beatIndex[64]; int numBeats = 0;
-        if (g.metronome && tp.playing)
+        if (g.metronome)
         {
             const int num = clampv(transport.timeSigNumerator, 1, 32);
             const double beatLen = cb.barLen / num;
@@ -342,13 +413,16 @@ public:
             const float xl = inL[i], xr = inR[i];   // read input before any output write
             hist_.write(now_, xl, xr);
 
-            dryMix_ += dDry; wetMix_ += dWet; driftDepth_ += dDr;
-            const float d = driftDepth_ * drift_.next();
+            dryMix_ += dDry; wetMix_ += dWet; driftDepth_ += dDr; monMix_ += dMon;
+            // Latency glides at up to 2 % speed so turning the knob never clicks.
+            if (latency_ != latT) latency_ += clampv(latT - latency_, -kLatencyGlide, kLatencyGlide);
+            const float d = driftDepth_ * drift_.next() - latency_;   // read position = idx - d
 
             float wl = 0.0f, wr = 0.0f, presMax = 0.0f;
             for (Bank& k : banks_)
             {
                 const float pres = k.presence.next();
+                const float gate = k.gate.next();
                 const float gain = k.gain.next();
                 const float dub = k.dub.next();
                 k.fb += k.dFb;
@@ -381,15 +455,16 @@ public:
                     sr += dub * (nr - sr);
                 }
                 k.idx = k.idx + 1 >= k.len ? 0 : k.idx + 1;
+                if (k.idx == 0 && timing_ == PlayTiming::LoopEnd && k.on != k.wantOn) setOn(k, k.wantOn, true);
 
-                const float gp = gain * pres;
+                const float gp = gain * pres * gate;
                 wl += ll * gp;
                 wr += lr * gp;
             }
 
             const float aw = std::fabs(wl) > std::fabs(wr) ? std::fabs(wl) : std::fabs(wr);
             if (aw > loopPeak) loopPeak = aw;
-            const float dryG = 1.0f - presMax * (1.0f - dryMix_);
+            const float dryG = (1.0f - presMax * (1.0f - dryMix_)) * monMix_;
             float click = 0.0f;
             if (bti < numBeats && beatOffsets[bti] == i) { clickPos_ = 0; clickAccent_ = beatIndex[bti] == 0 ? 1 : 0; ++bti; }
             if (clickPos_ >= 0)
@@ -451,7 +526,8 @@ private:
         int64_t holdRemain = 0;
         // control
         std::atomic<bool> captureReq{false}, clearReq{false};
-        Ramp presence, gain, dub;
+        Ramp presence, gain, dub, gate;
+        bool on = true, wantOn = true;   // PLAY/STOP: in effect / asked for
         OnePole fbLp[2], outLp[2];
         float fb = 0.7f, dFb = 0.0f;
         bool wantDub = false, firstBlock = true;
@@ -461,7 +537,7 @@ private:
 
     void readLoop(const Buffer& B, int64_t len, int64_t idx, float d, float& outLeft, float& outRight) const
     {
-        if (d <= 0.0f) { outLeft = B.l[(size_t)idx]; outRight = B.r[(size_t)idx]; return; }
+        if (d == 0.0f) { outLeft = B.l[(size_t)idx]; outRight = B.r[(size_t)idx]; return; }
         const float pos = (float)idx - d;
         const float fl = std::floor(pos);
         const float frac = pos - fl;
@@ -490,6 +566,14 @@ private:
         k.idx = wrap((int64_t)std::llround(bar * barLen_ + phase0 + k.offsetBar), k.len);
     }
 
+    // PLAY/STOP takes effect. `crisp`: a start lands on a boundary (or from the top), so it
+    // comes in at full level on its first sample; otherwise a 5 ms gate fade.
+    static void setOn(Bank& k, bool on, bool crisp)
+    {
+        k.on = on;
+        if (on && crisp) k.gate.snap(1.0f); else k.gate.setTarget(on ? 1.0f : 0.0f);
+    }
+
     void refuse(Bank& k, Status s)
     {
         k.holdStatus = s; k.holdRemain = holdLen_;
@@ -508,6 +592,7 @@ private:
         if (dbCount_ < kMaxDownbeats) ++dbCount_;
         for (Bank& k : banks_)
         {
+            if (timing_ == PlayTiming::BarEnd && k.on != k.wantOn) setOn(k, k.wantOn, true);
             if (k.arm == Arm::Waiting)
             {
                 const int64_t len = (int64_t)std::llround(k.recBars * barLen);
@@ -645,6 +730,7 @@ private:
         k.fbLp[0].reset(); k.fbLp[1].reset();
         k.copyPending = false;
         copyBank_ = -1;
+        ++diag_.loopsCompleted;
     }
 
     Status computeStatus(const Bank& k) const
@@ -694,7 +780,8 @@ private:
     // transport detection
     bool    havePrevPpq_ = false;
     double  prevPpq_ = 0.0;
-    int     prevFrames_ = 0, advanceRun_ = 0;
+    int     prevFrames_ = 0, advanceRun_ = 0, stillRun_ = 0;
+    bool    prevFlag_ = false;
 
     // metronome (added to the output only; never recorded into history or loops)
     std::vector<float> clickTable_[2];
@@ -703,7 +790,12 @@ private:
 
     // shared control
     DriftSource drift_;
-    float dryMix_ = 1.0f, wetMix_ = 0.0f, driftDepth_ = 0.0f;
+    float dryMix_ = 1.0f, wetMix_ = 0.0f, driftDepth_ = 0.0f, monMix_ = 1.0f;
+    bool  restartReq_ = false, wasRunning_ = false;
+    int   masterForced_ = -1;
+    PlayTiming timing_ = PlayTiming::Immediate;   // -1: follow playAll; 0/1: transport edge, until playAll matches
+    float latency_ = 0.0f;   // samples the loop read runs ahead of idx (overdub still writes at idx)
+    static constexpr float kLatencyGlide = 0.02f;
     bool  mixFirst_ = true;
 };
 

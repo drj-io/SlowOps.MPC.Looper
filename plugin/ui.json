@@ -1,5 +1,5 @@
 {
-  "kit": "cyan",
+  "kit": "violet",
   "pages": [
     {
       "name": "LOOPS",
@@ -52,21 +52,30 @@
         },
         "empty",
         "empty",
-        "empty",
+        {
+          "param": "Latency",
+          "widget": "knob"
+        },
         {
           "param": "Drift",
           "widget": "knob"
         },
         "empty",
         "empty",
-        "empty",
+        {
+          "param": "Monitor",
+          "widget": "switch"
+        },
         {
           "param": "Mix",
           "widget": "fader"
         },
         "empty",
         "empty",
-        "empty",
+        {
+          "param": "Auto Standby",
+          "widget": "switch"
+        },
         {
           "param": "Click Level",
           "widget": "knob"
@@ -126,7 +135,10 @@
           "param": "Loop State",
           "widget": "slider"
         },
-        "empty",
+        {
+          "param": "Test Tone",
+          "widget": "switch"
+        },
         {
           "param": "Status 1",
           "widget": "slider"

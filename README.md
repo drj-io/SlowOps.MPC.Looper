@@ -48,15 +48,18 @@ That script keeps the triggers off the Q-Links, adds the beat boxes, and drops i
   - **Freeze** repeats the loop.
   - **On Demand** overdubs each bank while its Overdub is on.
   - **Continuous** overdubs every bank on every pass.
-  - Overdubbing writes `loop = softclip(tone(loop) × Feedback + input)`.
+  - Overdubbing writes `loop = limit(tone(loop) × Feedback + input)`. Feedback defaults to 100 %, so layers stack
+    and nothing fades; lower it for a tape-echo fade. The limiter is untouched below about −2 dBFS and only rounds
+    off stacked peaks, so a loop at 100 % keeps its level pass after pass.
 - **Timing.** Tempo, time signature and bar position come from the MPC transport. Loops snap to the host's bar
   lines. While the transport is stopped, an internal bar clock at the project tempo keeps everything running.
 - **Mix.** An equal-power blend of the live track and the sum of the banks. Before any capture, the track
   passes through untouched.
 - **Click-free.** 10 ms seam crossfade at the loop point, 20 ms crossfade when re-capturing into a playing
   bank, and 20 ms ramps for the first capture, Clear, volume, solo and mute.
-- **Metronome.** An optional short blip on each beat (accented on the 1), only while the transport plays. It is
-  added after the loops, so it is never captured.
+- **Metronome.** An optional short pop on each beat (accented on the 1), transport playing or stopped. It is
+  added after the loops, so it is never captured. Off / On / Standby: with Auto Standby (on by default) it
+  goes to Standby once your first loop is captured, and comes back On at the next Clear All.
 - **State.** All settings are saved with the project. Captured audio is temporary.
 
 ## Limits of this prototype
